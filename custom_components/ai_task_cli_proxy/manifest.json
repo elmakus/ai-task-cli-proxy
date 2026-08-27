@@ -1,0 +1,11 @@
+{
+  "domain": "ai_task_cli_proxy",
+  "name": "CLIProxyAPI Image Generation",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/router-for-me/CLIProxyAPI",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "version": "0.1.0"
+}

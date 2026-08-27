@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to CLIProxyAPI",
+        "description": "Connect Home Assistant to the local CLIProxyAPI server for image generation.",
+        "data": {
+          "base_url": "Base URL",
+          "api_key": "API key",
+          "model": "Image model"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid API key"
+    },
+    "abort": {
+      "already_configured": "This CLIProxyAPI server is already configured"
+    }
+  }
+}

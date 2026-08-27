@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from pathlib import Path
 from typing import Any, override
 from urllib.parse import quote
 
@@ -18,6 +19,9 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import CONF_BASE_URL, CONF_MODEL, REQUEST_TIMEOUT_SECONDS
+
+MAX_ATTACHMENT_COUNT = 10
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
 async def async_setup_entry(
@@ -34,7 +38,10 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Image generation"
-    _attr_supported_features = ai_task.AITaskEntityFeature.GENERATE_IMAGE
+    _attr_supported_features = (
+        ai_task.AITaskEntityFeature.GENERATE_IMAGE
+        | ai_task.AITaskEntityFeature.SUPPORT_ATTACHMENTS
+    )
 
     def __init__(self, entry: ConfigEntry) -> None:
         """Initialize the entity."""
@@ -54,11 +61,47 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
         endpoint = (
             f"{base_url}/v1beta/models/{quote(model, safe='')}:generateContent"
         )
+        parts: list[dict[str, Any]] = [{"text": task.instructions}]
+        if task.attachments:
+            if len(task.attachments) > MAX_ATTACHMENT_COUNT:
+                raise HomeAssistantError(
+                    f"At most {MAX_ATTACHMENT_COUNT} image attachments are supported"
+                )
+
+            total_attachment_bytes = 0
+            for attachment in task.attachments:
+                if not attachment.mime_type.startswith("image/"):
+                    raise HomeAssistantError(
+                        "CLIProxyAPI image generation only supports image attachments"
+                    )
+                try:
+                    attachment_data = await self.hass.async_add_executor_job(
+                        Path(attachment.path).read_bytes
+                    )
+                except OSError as err:
+                    raise HomeAssistantError(
+                        "Could not read an image attachment"
+                    ) from err
+
+                total_attachment_bytes += len(attachment_data)
+                if total_attachment_bytes > MAX_ATTACHMENT_BYTES:
+                    raise HomeAssistantError(
+                        "Image attachments exceed the 20 MB combined limit"
+                    )
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": attachment.mime_type,
+                            "data": base64.b64encode(attachment_data).decode("ascii"),
+                        }
+                    }
+                )
+
         payload = {
             "contents": [
                 {
                     "role": "user",
-                    "parts": [{"text": task.instructions}],
+                    "parts": parts,
                 }
             ],
             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},

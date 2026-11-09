@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install test dependencies
-        run: python -m pip install --upgrade pip pytest aiohttp
+        run: python -m pip install --upgrade pip pytest aiohttp voluptuous
       - name: Compile integration
         run: python -m compileall -q custom_components/ai_task_cli_proxy
       - name: Validate manifest JSON

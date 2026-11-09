@@ -12,6 +12,9 @@ by integrations such as **Activity Images** and used through Home Assistant's
 - Native Home Assistant AI Task image generation.
 - Gemini-compatible `/v1beta/models/{model}:generateContent` endpoint.
 - Optional reference-image attachments (up to 10 files and 20 MB total input).
+- Change the image model later through **Options** without reinstalling.
+- Change server URL or API key through **Reconfigure**, preserving the existing entity.
+- HTTP response and image-size checks to prevent oversized provider payloads.
 - Configurable API server URL, API key, and model at initial setup.
 - On-demand requests with a 180-second timeout.
 
@@ -34,8 +37,36 @@ may reference `ai_task.image_generation`.
 At initial setup, enter the CLIProxyAPI server URL, API key, and the
 Gemini-compatible image model. The server must be reachable from Home Assistant.
 
+To change the **image model**, go to **Settings → Devices & services →
+CLIProxyAPI Image Generation → Configure** (Options Flow). The next image
+request uses the new model; the existing AI Task entity ID is preserved.
+
+To change the **server URL or API key**, use **Reconfigure** on the same
+integration. The new connection is tested before it replaces the saved one.
+Leave the API key empty to retain the existing key. The existing config
+entry and entity ID are kept.
+
 The config flow verifies connectivity to `/v1/models`; it does not
 independently validate that the selected model supports image generation.
+
+Generated images are limited to 25 MB, responses to 40 MB, and the total
+reference attachments to 20 MB. Oversized or malformed responses result in
+a Home Assistant error instead of an unbounded read.
+
+## Tests
+
+The adapter has isolated Python unit tests for both normal image generation
+and error scenarios, including reference attachments, bounds, and option
+changes. GitHub Actions runs the tests for Python 3.13 and 3.14 on pushes and
+pull requests.
+
+Run them locally with:
+
+```sh
+python -m pip install pytest aiohttp voluptuous
+python -m pytest -q tests/
+```
+
 
 ## Source layout
 

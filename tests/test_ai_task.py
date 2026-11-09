@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import asyncio
 from dataclasses import dataclass
 from enum import IntFlag
@@ -21,6 +22,40 @@ class _Feature(IntFlag):
 
 class _AITaskEntity:
     hass = None
+
+
+class _ConfigFlow:
+    def __init_subclass__(cls, domain=None, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+    def async_show_form(self, **kwargs):
+        return {"type": "form", **kwargs}
+
+    def async_create_entry(self, **kwargs):
+        return {"type": "create_entry", **kwargs}
+
+    async def async_set_unique_id(self, unique_id):
+        self._last_unique_id = unique_id
+
+    def _abort_if_unique_id_configured(self):
+        return None
+
+    def _abort_if_unique_id_mismatch(self):
+        return None
+
+    def _get_reconfigure_entry(self):
+        return self.config_entry
+
+    def async_update_reload_and_abort(self, entry, *, data_updates):
+        return {"type": "abort", "entry": entry, "data_updates": data_updates}
+
+
+class _OptionsFlow:
+    def async_show_form(self, **kwargs):
+        return {"type": "form", **kwargs}
+
+    def async_create_entry(self, **kwargs):
+        return {"type": "create_entry", **kwargs}
 
 
 @dataclass
@@ -49,6 +84,8 @@ def _install_home_assistant_stubs() -> None:
             "homeassistant.components.conversation"
         ),
         "homeassistant.config_entries": ModuleType("homeassistant.config_entries"),
+        "homeassistant.data_entry_flow": ModuleType("homeassistant.data_entry_flow"),
+        "homeassistant.helpers.selector": ModuleType("homeassistant.helpers.selector"),
         "homeassistant.const": ModuleType("homeassistant.const"),
         "homeassistant.core": ModuleType("homeassistant.core"),
         "homeassistant.exceptions": ModuleType("homeassistant.exceptions"),
@@ -72,6 +109,15 @@ def _install_home_assistant_stubs() -> None:
     modules["homeassistant.components.conversation"].AssistantContent = _AssistantContent
     modules["homeassistant.components.conversation"].ChatLog = object
     modules["homeassistant.config_entries"].ConfigEntry = object
+    modules["homeassistant.config_entries"].ConfigFlow = _ConfigFlow
+    modules["homeassistant.config_entries"].OptionsFlow = _OptionsFlow
+    modules["homeassistant.data_entry_flow"].FlowResult = dict
+    modules["homeassistant.core"].callback = lambda fn: fn
+
+    selectors = modules["homeassistant.helpers.selector"]
+    selectors.TextSelector = lambda _config=None: str
+    selectors.TextSelectorConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+    selectors.TextSelectorType = SimpleNamespace(URL="url", PASSWORD="password")
     modules["homeassistant.const"].CONF_API_KEY = "api_key"
     modules["homeassistant.const"].Platform = SimpleNamespace(AI_TASK="ai_task")
     modules["homeassistant.core"].HomeAssistant = object
@@ -91,6 +137,13 @@ from custom_components.ai_task_cli_proxy import ai_task as integration
 
 
 class _FakeResponse:
+    @property
+    def content(self):
+        return self
+
+    async def read(self, limit=-1):
+        return json.dumps(await self.json(content_type=None)).encode("utf-8")
+
     async def __aenter__(self):
         return self
 
@@ -156,6 +209,7 @@ def test_image_attachment_is_sent_as_gemini_inline_data(
 
     entry = SimpleNamespace(
         entry_id="entry-id",
+        options={},
         data={
             "base_url": "http://cliproxy.invalid",
             "model": "gemini-test",
@@ -223,6 +277,7 @@ class _ControlledSession:
 def _entity_for_test():
     entry = SimpleNamespace(
         entry_id="entry-id",
+        options={},
         data={
             "base_url": "http://cliproxy.invalid/",
             "model": "gemini/test",
@@ -398,3 +453,131 @@ def test_network_or_json_error_is_reported(
         asyncio.run(
             _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
         )
+
+
+
+def test_model_option_is_used_by_provider(monkeypatch: pytest.MonkeyPatch):
+    session = _ControlledSession(_ControlledResponse(_generated_response()))
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
+    entity = _entity_for_test()
+    entity._entry.options = {"model": "new-image-model"}
+    result = asyncio.run(
+        entity._async_generate_image(_task_for_test(), _FakeChatLog())
+    )
+    assert result.model == "new-image-model"
+    assert session.endpoint.endswith("/models/new-image-model:generateContent")
+
+
+def test_rejects_oversized_generated_image(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(integration, "MAX_IMAGE_BYTES", 3)
+    response = _generated_response([{
+        "inlineData": {
+            "mimeType": "image/png",
+            "data": base64.b64encode(b"four").decode(),
+        }
+    }])
+    session = _ControlledSession(_ControlledResponse(response))
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
+    with pytest.raises(RuntimeError, match="generated image exceeds"):
+        asyncio.run(
+            _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+        )
+
+
+def test_rejects_large_http_response(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(integration, "MAX_RESPONSE_BYTES", 8)
+    session = _ControlledSession(_ControlledResponse(_generated_response()))
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
+    with pytest.raises(RuntimeError, match="response exceeds"):
+        asyncio.run(
+            _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+        )
+
+
+def test_rejects_non_object_response(monkeypatch: pytest.MonkeyPatch):
+    session = _ControlledSession(_ControlledResponse([]))
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
+    with pytest.raises(RuntimeError, match="invalid response"):
+        asyncio.run(
+            _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+        )
+
+
+def test_rejects_invalid_json_body(monkeypatch: pytest.MonkeyPatch):
+    response = _ControlledResponse(_generated_response())
+
+    async def read(_limit=-1):
+        return b"{broken JSON"
+
+    response.read = read
+    session = _ControlledSession(response)
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        asyncio.run(
+            _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+        )
+
+
+def test_can_find_image_in_second_candidate(monkeypatch: pytest.MonkeyPatch):
+    response = _generated_response()
+    response["candidates"].insert(0, {"content": {"parts": [{"text": "thinking"}]}})
+    session = _ControlledSession(_ControlledResponse(response))
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
+    result = asyncio.run(
+        _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+    )
+    assert result.image_data == b"image-bytes"
+
+
+def test_options_flow_keeps_existing_model(monkeypatch: pytest.MonkeyPatch):
+    from custom_components.ai_task_cli_proxy.config_flow import CLIProxyAPIOptionsFlow
+
+    flow = CLIProxyAPIOptionsFlow()
+    flow.config_entry = SimpleNamespace(
+        data={"model": "original-model"}, options={"model": "chosen-model"}
+    )
+    form = asyncio.run(flow.async_step_init())
+    assert form["type"] == "form"
+    assert form["step_id"] == "init"
+    assert form["data_schema"]({})["model"] == "chosen-model"
+    saved = asyncio.run(flow.async_step_init({"model": " new-model "}))
+    assert saved == {"type": "create_entry", "data": {"model": "new-model"}}
+    invalid = asyncio.run(flow.async_step_init({"model": "  "}))
+    assert invalid["errors"]["model"] == "invalid_model"
+
+
+def test_reconfigure_keeps_entry_id_and_old_key(monkeypatch: pytest.MonkeyPatch):
+    from custom_components.ai_task_cli_proxy import config_flow
+
+    flow = config_flow.CLIProxyAPIConfigFlow()
+    entry = SimpleNamespace(
+        unique_id="http://original.example:8317",
+        data={"base_url": "http://original.example:8317", "api_key": "old-secret"},
+    )
+    flow.config_entry = entry
+
+    async def check_connection(_hass, _base_url, _api_key):
+        return None
+
+    monkeypatch.setattr(config_flow, "_async_check_connection", check_connection)
+    result = asyncio.run(flow.async_step_reconfigure({
+        "base_url": "http://new.example:8317/",
+    }))
+    assert result["type"] == "abort"
+    assert result["entry"] is entry
+    assert result["data_updates"] == {
+        "base_url": "http://new.example:8317", "api_key": "old-secret",
+    }
+    assert flow._last_unique_id == entry.unique_id
+
+
+def test_reconfigure_rejects_invalid_url():
+    from custom_components.ai_task_cli_proxy import config_flow
+
+    flow = config_flow.CLIProxyAPIConfigFlow()
+    flow.config_entry = SimpleNamespace(
+        unique_id="entry",
+        data={"base_url": "http://cliproxy.invalid", "api_key": "secret"},
+    )
+    invalid = asyncio.run(flow.async_step_reconfigure({"base_url": "file:///bad"}))
+    assert invalid["errors"]["base"] == "invalid_url"

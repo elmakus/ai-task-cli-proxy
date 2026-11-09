@@ -1,7 +1,9 @@
 {
   "domain": "ai_task_cli_proxy",
   "name": "CLIProxyAPI Image Generation",
-  "codeowners": [],
+  "codeowners": [
+    "@elmakus"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/elmakus/ai-task-cli-proxy",
   "integration_type": "service",

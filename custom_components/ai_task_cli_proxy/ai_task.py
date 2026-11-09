@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from pathlib import Path
 from typing import Any, override
 from urllib.parse import quote
@@ -22,6 +23,14 @@ from .const import CONF_BASE_URL, CONF_MODEL, REQUEST_TIMEOUT_SECONDS
 
 MAX_ATTACHMENT_COUNT = 10
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_RESPONSE_BYTES = 40 * 1024 * 1024
+MAX_IMAGE_BYTES = 25 * 1024 * 1024
+
+
+def _read_bounded(path: Path, remaining_bytes: int) -> bytes:
+    """Read no more than the remaining attachment budget plus one byte."""
+    with path.open("rb") as stream:
+        return stream.read(remaining_bytes + 1)
 
 
 async def async_setup_entry(
@@ -56,7 +65,7 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
     ) -> ai_task.GenImageTaskResult:
         """Generate an image with CLIProxyAPI's Gemini-compatible endpoint."""
         base_url = self._entry.data[CONF_BASE_URL].rstrip("/")
-        model = self._entry.data[CONF_MODEL]
+        model = self._entry.options.get(CONF_MODEL, self._entry.data[CONF_MODEL])
         api_key = self._entry.data[CONF_API_KEY]
         endpoint = (
             f"{base_url}/v1beta/models/{quote(model, safe='')}:generateContent"
@@ -76,7 +85,9 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
                     )
                 try:
                     attachment_data = await self.hass.async_add_executor_job(
-                        Path(attachment.path).read_bytes
+                        _read_bounded,
+                        Path(attachment.path),
+                        MAX_ATTACHMENT_BYTES - total_attachment_bytes,
                     )
                 except OSError as err:
                     raise HomeAssistantError(
@@ -115,7 +126,17 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
                 timeout=ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
             ) as response:
                 response.raise_for_status()
-                result: dict[str, Any] = await response.json(content_type=None)
+                raw_response = await response.content.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw_response) > MAX_RESPONSE_BYTES:
+                    raise HomeAssistantError(
+                        "CLIProxyAPI response exceeds the 40 MB size limit"
+                    )
+                try:
+                    result: Any = json.loads(raw_response)
+                except (json.JSONDecodeError, UnicodeDecodeError) as err:
+                    raise HomeAssistantError(
+                        "CLIProxyAPI returned invalid JSON"
+                    ) from err
         except ClientResponseError as err:
             raise HomeAssistantError(
                 f"CLIProxyAPI returned HTTP {err.status} while generating an image"
@@ -125,26 +146,54 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
                 "Could not get an image response from CLIProxyAPI"
             ) from err
 
+        if not isinstance(result, dict):
+            raise HomeAssistantError("CLIProxyAPI returned an invalid response")
+
         response_text = ""
         image_bytes: bytes | None = None
         mime_type: str | None = None
-        candidates = result.get("candidates") or []
-        if candidates:
-            parts = (candidates[0].get("content") or {}).get("parts") or []
+
+        candidates = result.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
             for part in parts:
+                if not isinstance(part, dict):
+                    continue
                 inline_data = part.get("inlineData") or part.get("inline_data")
-                if inline_data and image_bytes is None:
+                if isinstance(inline_data, dict) and image_bytes is None:
                     encoded = inline_data.get("data")
                     candidate_mime = inline_data.get("mimeType") or inline_data.get(
                         "mime_type"
                     )
-                    if encoded and candidate_mime and candidate_mime.startswith("image/"):
+                    if (
+                        isinstance(encoded, str)
+                        and isinstance(candidate_mime, str)
+                        and candidate_mime.startswith("image/")
+                    ):
+                        if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 4:
+                            raise HomeAssistantError(
+                                "CLIProxyAPI generated image exceeds the 25 MB size limit"
+                            )
                         try:
-                            image_bytes = base64.b64decode(encoded, validate=True)
+                            decoded = base64.b64decode(encoded, validate=True)
                         except (binascii.Error, ValueError) as err:
                             raise HomeAssistantError(
                                 "CLIProxyAPI returned invalid image data"
                             ) from err
+                        if len(decoded) > MAX_IMAGE_BYTES:
+                            raise HomeAssistantError(
+                                "CLIProxyAPI generated image exceeds the 25 MB size limit"
+                            )
+                        image_bytes = decoded
                         mime_type = candidate_mime
                 elif isinstance(part.get("text"), str):
                     response_text += part["text"]

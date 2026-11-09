@@ -25,6 +25,8 @@ class _AITaskEntity:
 
 
 class _ConfigFlow:
+    hass = None
+
     def __init_subclass__(cls, domain=None, **kwargs):
         super().__init_subclass__(**kwargs)
 

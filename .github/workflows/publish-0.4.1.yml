@@ -1,0 +1,17 @@
+name: Publish approved v0.4.1
+on:
+  push:
+    branches: [release/v0.4.1]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish exact tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create v0.4.1 --target 09cb29eb0a846fe0dc017dee496c1b5f6ba9d144 --title "CLIProxyAPI Image Generation 0.4.1" --notes "Home Assistant quality improvements: startup connection and model validation, duplicate-entry protection, native reauthentication, shared catalog requests, local branding, and expanded tests. Existing entity IDs and configuration are preserved. No automatic paid fallback."

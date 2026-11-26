@@ -46,12 +46,17 @@ integration. The new connection is tested before it replaces the saved one.
 Leave the API key empty to retain the existing key. The existing config
 entry and entity ID are kept.
 
-The config flow verifies connectivity to `/v1/models`; it does not
-independently validate that the selected model supports image generation.
+The config flow verifies connectivity to `/v1/models` and a valid model-list
+response (up to 1 MiB). Model names remain configurable, including aliases; the
+flow does not generate an image to verify model capabilities. HTTP redirects are
+not followed. Use HTTPS if the connection crosses an untrusted network.
 
-Generated images are limited to 25 MB, responses to 40 MB, and the total
-reference attachments to 20 MB. Oversized or malformed responses result in
-a Home Assistant error instead of an unbounded read.
+Generated images are limited to 25 MiB and 25 million pixels, responses to
+40 MiB, and the total reference attachments to 20 MiB. Generated images must
+be decodable, non-animated PNG, JPEG or WebP matching the reported MIME type.
+Oversized or malformed responses result in a Home Assistant error instead of an
+unbounded read. Requests are never automatically retried by this adapter; after
+a timeout or malformed provider response, the outcome may be unknown.
 
 ## Tests
 
@@ -63,15 +68,27 @@ pull requests.
 Run them locally with:
 
 ```sh
-python -m pip install pytest aiohttp voluptuous
+python -m pip install pytest aiohttp voluptuous pillow
 python -m pytest -q tests/
 ```
 
+
+Native AI Task integration and service tests use pinned HA 2026.11.0 fixtures
+and synthetic HTTP responses. Run them separately from the lightweight tests
+(which install HA stubs), using Python 3.14:
+
+```sh
+python -m pip install -r requirements-native-tests.txt
+python -m pytest -p no:respx --asyncio-mode=auto -o asyncio_default_fixture_loop_scope=function -q tests_native/
+```
+
+No test requires a real CLIProxyAPI server, API credentials or paid generation.
 
 ## Source layout
 
 - Integration: `custom_components/ai_task_cli_proxy/`
 - Unit tests: `tests/`
+- Native HA contract tests: `tests_native/`
 
 This project is independently maintained for local Home Assistant use.
 It is not affiliated with the upstream CLIProxyAPI project.

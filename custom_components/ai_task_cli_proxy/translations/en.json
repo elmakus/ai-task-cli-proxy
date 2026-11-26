@@ -9,14 +9,39 @@
           "api_key": "API key",
           "model": "Image model"
         }
+      },
+      "reconfigure": {
+        "title": "Change CLIProxyAPI server connection",
+        "description": "Leave API key blank to keep the existing key.",
+        "data": {
+          "base_url": "Base URL",
+          "api_key": "New API key (optional)"
+        }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect",
-      "invalid_auth": "Invalid API key"
+      "invalid_auth": "Invalid API key",
+      "invalid_url": "Enter a valid HTTP or HTTPS URL without credentials or query parameters",
+      "invalid_model": "Enter a model name"
     },
     "abort": {
-      "already_configured": "This CLIProxyAPI server is already configured"
+      "already_configured": "This CLIProxyAPI server is already configured",
+      "reconfigure_successful": "CLIProxyAPI connection updated"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Image generation model",
+        "description": "Changes apply to the next image generation request. Changing the model does not change the server connection.",
+        "data": {
+          "model": "Image model"
+        }
+      }
+    },
+    "error": {
+      "invalid_model": "Enter a model name"
     }
   }
 }

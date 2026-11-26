@@ -8,6 +8,8 @@ import asyncio
 from dataclasses import dataclass
 from enum import IntFlag
 from pathlib import Path
+from io import BytesIO
+from PIL import Image
 import sys
 from types import SimpleNamespace
 from types import ModuleType
@@ -66,6 +68,8 @@ class _GenImageTaskResult:
     conversation_id: str
     mime_type: str
     model: str
+    width: int | None = None
+    height: int | None = None
 
 
 @dataclass
@@ -108,7 +112,9 @@ def _install_home_assistant_stubs() -> None:
     modules["homeassistant.components.ai_task"].AITaskEntity = _AITaskEntity
     modules["homeassistant.components.ai_task"].AITaskEntityFeature = _Feature
     modules["homeassistant.components.ai_task"].GenImageTaskResult = _GenImageTaskResult
-    modules["homeassistant.components.conversation"].AssistantContent = _AssistantContent
+    modules[
+        "homeassistant.components.conversation"
+    ].AssistantContent = _AssistantContent
     modules["homeassistant.components.conversation"].ChatLog = object
     modules["homeassistant.config_entries"].ConfigEntry = object
     modules["homeassistant.config_entries"].ConfigFlow = _ConfigFlow
@@ -135,16 +141,31 @@ def _install_home_assistant_stubs() -> None:
 
 _install_home_assistant_stubs()
 
-from custom_components.ai_task_cli_proxy import ai_task as integration
+from custom_components.ai_task_cli_proxy import ai_task as integration  # noqa: E402
+
+
+def _image_bytes(format="PNG"):
+    buffer = BytesIO()
+    Image.new("RGB", (2, 3), "white").save(buffer, format=format)
+    return buffer.getvalue()
+
+
+PNG = _image_bytes()
 
 
 class _FakeResponse:
+    status = 200
+    _consumed = 0
+
     @property
     def content(self):
         return self
 
     async def read(self, limit=-1):
-        return json.dumps(await self.json(content_type=None)).encode("utf-8")
+        body = json.dumps(await self.json(content_type=None)).encode("utf-8")
+        chunk = body[self._consumed : self._consumed + limit]
+        self._consumed += len(chunk)
+        return chunk
 
     async def __aenter__(self):
         return self
@@ -166,7 +187,7 @@ class _FakeResponse:
                             {
                                 "inlineData": {
                                     "mimeType": "image/png",
-                                    "data": base64.b64encode(b"generated").decode(),
+                                    "data": base64.b64encode(PNG).decode(),
                                 }
                             },
                         ]
@@ -180,9 +201,10 @@ class _FakeSession:
     def __init__(self) -> None:
         self.payload = None
 
-    def post(self, _endpoint, *, headers, json, timeout):
+    def post(self, _endpoint, *, headers, data, timeout, allow_redirects):
         del headers, timeout
-        self.payload = json
+        assert allow_redirects is False
+        self.payload = json.loads(data)
         return _FakeResponse()
 
 
@@ -223,14 +245,12 @@ def test_image_attachment_is_sent_as_gemini_inline_data(
     entity.entity_id = "ai_task.cli_proxy"
     task = SimpleNamespace(
         instructions="Create an icon",
-        attachments=[
-            SimpleNamespace(path=reference, mime_type="image/png")
-        ],
+        attachments=[SimpleNamespace(path=reference, mime_type="image/png")],
     )
 
     result = asyncio.run(entity._async_generate_image(task, _FakeChatLog()))
 
-    assert result.image_data == b"generated"
+    assert result.image_data == PNG
     assert session.payload["contents"][0]["parts"] == [
         {"text": "Create an icon"},
         {
@@ -267,9 +287,10 @@ class _ControlledSession:
         self.headers = None
         self.timeout = None
 
-    def post(self, endpoint, *, headers, json, timeout):
+    def post(self, endpoint, *, headers, data, timeout, allow_redirects):
         self.called = True
-        self.payload = json
+        self.payload = json.loads(data)
+        assert allow_redirects is False
         self.endpoint = endpoint
         self.headers = headers
         self.timeout = timeout
@@ -303,10 +324,12 @@ def _generated_response(parts=None):
     if parts is None:
         parts = [
             {"text": "finished"},
-            {"inlineData": {
-                "mimeType": "image/png",
-                "data": base64.b64encode(b"image-bytes").decode("ascii"),
-            }},
+            {
+                "inlineData": {
+                    "mimeType": "image/png",
+                    "data": base64.b64encode(PNG).decode("ascii"),
+                }
+            },
         ]
     return {"candidates": [{"content": {"parts": parts}}]}
 
@@ -315,20 +338,27 @@ def test_endpoint_headers_and_result(monkeypatch: pytest.MonkeyPatch):
     session = _ControlledSession(_ControlledResponse(_generated_response()))
     monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
     log = _FakeChatLog()
-    result = asyncio.run(_entity_for_test()._async_generate_image(_task_for_test(), log))
+    result = asyncio.run(
+        _entity_for_test()._async_generate_image(_task_for_test(), log)
+    )
 
     assert session.called is True
     assert session.endpoint == (
         "http://cliproxy.invalid/v1beta/models/gemini%2Ftest:generateContent"
     )
-    assert session.headers == {"Authorization": "Bearer not-a-real-key"}
+    assert session.headers == {
+        "Authorization": "Bearer not-a-real-key",
+        "Content-Type": "application/json",
+    }
+    assert (result.width, result.height) == (2, 3)
     assert session.payload["contents"][0]["parts"] == [
         {"text": "Draw a simple icon"},
     ]
     assert session.payload["generationConfig"]["responseModalities"] == [
-        "TEXT", "IMAGE",
+        "TEXT",
+        "IMAGE",
     ]
-    assert result.image_data == b"image-bytes"
+    assert result.image_data == PNG
     assert result.mime_type == "image/png"
     assert result.model == "gemini/test"
     assert result.conversation_id == "conversation-id"
@@ -336,11 +366,14 @@ def test_endpoint_headers_and_result(monkeypatch: pytest.MonkeyPatch):
     assert log.content[0].agent_id == "ai_task.image_generation"
 
 
-@pytest.mark.parametrize("parts", [
-    [{"text": "text only"}],
-    [],
-    [{"inlineData": {"mimeType": "text/plain", "data": "dGVzdA=="}}],
-])
+@pytest.mark.parametrize(
+    "parts",
+    [
+        [{"text": "text only"}],
+        [],
+        [{"inlineData": {"mimeType": "text/plain", "data": "dGVzdA=="}}],
+    ],
+)
 def test_rejects_missing_image(monkeypatch: pytest.MonkeyPatch, parts):
     session = _ControlledSession(_ControlledResponse(_generated_response(parts)))
     monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
@@ -351,9 +384,13 @@ def test_rejects_missing_image(monkeypatch: pytest.MonkeyPatch, parts):
 
 
 def test_rejects_invalid_base64(monkeypatch: pytest.MonkeyPatch):
-    response = _generated_response([{
-        "inlineData": {"mimeType": "image/png", "data": "NOT BASE64!!!"},
-    }])
+    response = _generated_response(
+        [
+            {
+                "inlineData": {"mimeType": "image/png", "data": "NOT BASE64!!!"},
+            }
+        ]
+    )
     session = _ControlledSession(_ControlledResponse(response))
     monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
     with pytest.raises(RuntimeError, match="invalid image data"):
@@ -384,7 +421,9 @@ def test_rejects_missing_attachment(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         asyncio.run(
             _entity_for_test()._async_generate_image(
                 _task_for_test(
-                    SimpleNamespace(path=tmp_path / "missing.png", mime_type="image/png")
+                    SimpleNamespace(
+                        path=tmp_path / "missing.png", mime_type="image/png"
+                    )
                 ),
                 _FakeChatLog(),
             )
@@ -396,8 +435,7 @@ def test_rejects_more_than_ten_attachments(monkeypatch: pytest.MonkeyPatch):
     session = _ControlledSession(_ControlledResponse(_generated_response()))
     monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
     attachments = [
-        SimpleNamespace(path="/unused.png", mime_type="image/png")
-        for _ in range(11)
+        SimpleNamespace(path="/unused.png", mime_type="image/png") for _ in range(11)
     ]
     with pytest.raises(RuntimeError, match="At most 10 image attachments"):
         asyncio.run(
@@ -442,10 +480,13 @@ def test_http_error_is_reported(monkeypatch: pytest.MonkeyPatch, status: int):
         )
 
 
-@pytest.mark.parametrize("failure", [
-    TimeoutError("timeout"),
-    ValueError("malformed response"),
-])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("timeout"),
+        ValueError("malformed response"),
+    ],
+)
 def test_network_or_json_error_is_reported(
     monkeypatch: pytest.MonkeyPatch, failure: Exception
 ):
@@ -457,27 +498,28 @@ def test_network_or_json_error_is_reported(
         )
 
 
-
 def test_model_option_is_used_by_provider(monkeypatch: pytest.MonkeyPatch):
     session = _ControlledSession(_ControlledResponse(_generated_response()))
     monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
     entity = _entity_for_test()
     entity._entry.options = {"model": "new-image-model"}
-    result = asyncio.run(
-        entity._async_generate_image(_task_for_test(), _FakeChatLog())
-    )
+    result = asyncio.run(entity._async_generate_image(_task_for_test(), _FakeChatLog()))
     assert result.model == "new-image-model"
     assert session.endpoint.endswith("/models/new-image-model:generateContent")
 
 
 def test_rejects_oversized_generated_image(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(integration, "MAX_IMAGE_BYTES", 3)
-    response = _generated_response([{
-        "inlineData": {
-            "mimeType": "image/png",
-            "data": base64.b64encode(b"four").decode(),
-        }
-    }])
+    response = _generated_response(
+        [
+            {
+                "inlineData": {
+                    "mimeType": "image/png",
+                    "data": base64.b64encode(b"four").decode(),
+                }
+            }
+        ]
+    )
     session = _ControlledSession(_ControlledResponse(response))
     monkeypatch.setattr(integration, "async_get_clientsession", lambda _hass: session)
     with pytest.raises(RuntimeError, match="generated image exceeds"):
@@ -508,8 +550,10 @@ def test_rejects_non_object_response(monkeypatch: pytest.MonkeyPatch):
 def test_rejects_invalid_json_body(monkeypatch: pytest.MonkeyPatch):
     response = _ControlledResponse(_generated_response())
 
+    chunks = iter([b"{broken JSON", b""])
+
     async def read(_limit=-1):
-        return b"{broken JSON"
+        return next(chunks)
 
     response.read = read
     session = _ControlledSession(response)
@@ -528,7 +572,7 @@ def test_can_find_image_in_second_candidate(monkeypatch: pytest.MonkeyPatch):
     result = asyncio.run(
         _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
     )
-    assert result.image_data == b"image-bytes"
+    assert result.image_data == PNG
 
 
 def test_options_flow_keeps_existing_model(monkeypatch: pytest.MonkeyPatch):
@@ -562,13 +606,18 @@ def test_reconfigure_keeps_entry_id_and_old_key(monkeypatch: pytest.MonkeyPatch)
         return None
 
     monkeypatch.setattr(config_flow, "_async_check_connection", check_connection)
-    result = asyncio.run(flow.async_step_reconfigure({
-        "base_url": "http://new.example:8317/",
-    }))
+    result = asyncio.run(
+        flow.async_step_reconfigure(
+            {
+                "base_url": "http://new.example:8317/",
+            }
+        )
+    )
     assert result["type"] == "abort"
     assert result["entry"] is entry
     assert result["data_updates"] == {
-        "base_url": "http://new.example:8317", "api_key": "old-secret",
+        "base_url": "http://new.example:8317",
+        "api_key": "old-secret",
     }
     assert flow._last_unique_id == entry.unique_id
 
@@ -583,3 +632,172 @@ def test_reconfigure_rejects_invalid_url():
     )
     invalid = asyncio.run(flow.async_step_reconfigure({"base_url": "file:///bad"}))
     assert invalid["errors"]["base"] == "invalid_url"
+
+
+@pytest.mark.parametrize("fragments", [2, 7])
+def test_fragmented_stream(monkeypatch, fragments):
+    from aiohttp import StreamReader
+    from aiohttp.base_protocol import BaseProtocol
+
+    async def run():
+        raw = json.dumps(_generated_response()).encode()
+        protocol = BaseProtocol(asyncio.get_running_loop())
+        protocol.transport = SimpleNamespace()
+        reader = StreamReader(protocol, limit=65536)
+
+        class Response(_ControlledResponse):
+            @property
+            def content(self):
+                return reader
+
+        response = Response()
+        step = max(1, len(raw) // fragments)
+
+        async def feed():
+            for i in range(0, len(raw), step):
+                reader.feed_data(raw[i : i + step])
+                await asyncio.sleep(0)
+            reader.feed_eof()
+
+        producer = asyncio.create_task(feed())
+        session = _ControlledSession(response)
+        monkeypatch.setattr(integration, "async_get_clientsession", lambda _: session)
+        try:
+            result = await _entity_for_test()._async_generate_image(
+                _task_for_test(), _FakeChatLog()
+            )
+            assert result.image_data == PNG
+        finally:
+            await producer
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("delta", [0, 1])
+def test_cumulative_response_limit(monkeypatch, delta):
+    raw = json.dumps(_generated_response()).encode()
+    monkeypatch.setattr(integration, "MAX_RESPONSE_BYTES", len(raw) - delta)
+    response = _ControlledResponse()
+    chunks = iter([raw[:4], raw[4:10], raw[10:], b""])
+
+    async def read(limit):
+        return next(chunks)
+
+    response.read = read
+    session = _ControlledSession(response)
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _: session)
+    action = _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+    if delta:
+        with pytest.raises(RuntimeError, match="response exceeds"):
+            asyncio.run(action)
+    else:
+        assert asyncio.run(action).image_data == PNG
+
+
+@pytest.mark.parametrize(
+    ("data", "mime", "message"),
+    [
+        (b"", "image/png", "invalid image data"),
+        (b"not an image", "image/png", "invalid image data"),
+        (PNG[:24], "image/png", "invalid image data"),
+        (PNG, "image/jpeg", "MIME type"),
+        (b"<svg/>", "image/svg+xml", "invalid image data"),
+    ],
+)
+def test_invalid_image_contents(monkeypatch, data, mime, message):
+    response = _generated_response(
+        [{"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode()}}]
+    )
+    session = _ControlledSession(_ControlledResponse(response))
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _: session)
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(
+            _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+        )
+
+
+@pytest.mark.parametrize(
+    ("format", "mime"),
+    [("PNG", "image/png"), ("JPEG", "image/jpeg"), ("WEBP", "image/webp")],
+)
+def test_supported_formats(format, mime):
+    data = _image_bytes(format)
+    assert integration._validate_image(data, mime) == (2, 3)
+
+
+def test_pixel_limit(monkeypatch):
+    monkeypatch.setattr(integration, "MAX_IMAGE_PIXELS", 5)
+    with pytest.raises(RuntimeError, match="pixel limit"):
+        integration._validate_image(PNG, "image/png")
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+def test_redirect_rejected(monkeypatch, status):
+    response = _ControlledResponse(_generated_response())
+    response.status = status
+    session = _ControlledSession(response)
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _: session)
+    with pytest.raises(RuntimeError, match=f"HTTP {status}"):
+        asyncio.run(
+            _entity_for_test()._async_generate_image(_task_for_test(), _FakeChatLog())
+        )
+    assert not response._consumed
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "expected"),
+    [
+        ({"data": [{"id": "custom-alias"}]}, 200, None),
+        ({"data": []}, 200, None),
+        ({"data": [42]}, 200, "cannot_connect"),
+        ({"data": [{"id": ""}]}, 200, "cannot_connect"),
+        ({"unexpected": []}, 200, "cannot_connect"),
+        ([], 200, "cannot_connect"),
+        ({"data": []}, 307, "cannot_connect"),
+    ],
+)
+def test_models_response(monkeypatch, body, status, expected):
+    from custom_components.ai_task_cli_proxy import config_flow
+
+    response = _ControlledResponse(body)
+    response.status = status
+
+    def get(endpoint, *, headers, timeout, allow_redirects):
+        assert endpoint == "http://unused.invalid/v1/models"
+        assert allow_redirects is False
+        return response
+
+    monkeypatch.setattr(
+        config_flow, "async_get_clientsession", lambda _: SimpleNamespace(get=get)
+    )
+    assert (
+        asyncio.run(
+            config_flow._async_check_connection(None, "http://unused.invalid", "fake")
+        )
+        == expected
+    )
+
+
+def test_models_response_limit(monkeypatch):
+    from custom_components.ai_task_cli_proxy import config_flow
+
+    monkeypatch.setattr(config_flow, "MAX_MODELS_RESPONSE_BYTES", 5)
+    response = _ControlledResponse({"data": [{"id": "model"}]})
+    monkeypatch.setattr(
+        config_flow,
+        "async_get_clientsession",
+        lambda _: SimpleNamespace(get=lambda *a, **kw: response),
+    )
+    assert (
+        asyncio.run(
+            config_flow._async_check_connection(None, "http://unused.invalid", "fake")
+        )
+        == "cannot_connect"
+    )
+
+
+def test_english_translations_match_strings():
+    root = Path(__file__).resolve().parents[1] / "custom_components/ai_task_cli_proxy"
+    assert json.loads((root / "strings.json").read_text()) == json.loads(
+        (root / "translations/en.json").read_text()
+    )

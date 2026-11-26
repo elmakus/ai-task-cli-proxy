@@ -1,0 +1,158 @@
+"""Native HA contract tests with a synthetic provider response."""
+
+import asyncio
+import base64
+import json
+from io import BytesIO
+from types import SimpleNamespace
+from unittest.mock import patch
+from aiohttp import StreamReader
+from aiohttp.base_protocol import BaseProtocol
+from PIL import Image
+from homeassistant.components import ai_task, conversation
+from pytest_homeassistant.common import MockConfigEntry
+import pytest
+from custom_components.ai_task_cli_proxy import ai_task as adapter
+
+
+class Response:
+    status = 200
+
+    def __init__(self, payload, split):
+        protocol = BaseProtocol(asyncio.get_running_loop())
+        protocol.transport = SimpleNamespace()
+        self.content = StreamReader(protocol, 65536)
+        if split:
+            self.content.feed_data(payload[:12])
+            asyncio.get_running_loop().call_soon(self.finish, payload[12:])
+        else:
+            self.finish(payload)
+
+    def finish(self, data):
+        self.content.feed_data(data)
+        self.content.feed_eof()
+
+    def raise_for_status(self):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return None
+
+
+@pytest.mark.parametrize("split", [False, True])
+async def test_actual_ha_result(hass, split):
+    f = BytesIO()
+    Image.new("RGB", (2, 2), "white").save(f, format="PNG")
+    image = f.getvalue()
+    raw = json.dumps(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "image/png",
+                                    "data": base64.b64encode(image).decode(),
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    ).encode()
+    entry = MockConfigEntry(
+        domain="ai_task_cli_proxy",
+        data={
+            "base_url": "http://unused.invalid",
+            "model": "synthetic",
+            "api_key": "fake",
+        },
+    )
+    entity = adapter.CLIProxyAPIImageTaskEntity(entry)
+    entity.hass = hass
+    entity.entity_id = "ai_task.audit_fixture"
+    assistant_contents = []
+    chat = SimpleNamespace(
+        conversation_id="audit",
+        async_add_assistant_content_without_tools=assistant_contents.append,
+    )
+    session = SimpleNamespace(post=lambda *args, **kwargs: Response(raw, split))
+    with patch.object(adapter, "async_get_clientsession", return_value=session):
+        result = await entity._async_generate_image(
+            ai_task.GenImageTask(name="audit", instructions="synthetic"), chat
+        )
+    assert isinstance(result, ai_task.GenImageTaskResult)
+    assert result.image_data == image
+    assert isinstance(assistant_contents[0], conversation.AssistantContent)
+
+
+async def test_native_service(hass, enable_custom_integrations, tmp_path):
+    """Exercise actual integration setup, entity registration and AI Task service."""
+    from homeassistant.setup import async_setup_component
+    from homeassistant.helpers import entity_registry as er
+
+    hass.config.media_dirs = {"local": str(tmp_path)}
+    assert await async_setup_component(hass, "homeassistant", {})
+    entry = MockConfigEntry(
+        domain="ai_task_cli_proxy",
+        title="CLIProxyAPI Images",
+        data={
+            "base_url": "http://unused.invalid",
+            "model": "synthetic",
+            "api_key": "fake",
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "ai_task", "ai_task_cli_proxy", entry.entry_id
+    )
+    assert entity_id is not None
+    assert hass.services.has_service("ai_task", "generate_image")
+    image = BytesIO()
+    Image.new("RGB", (2, 3), "white").save(image, format="PNG")
+    raw = json.dumps(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "image/png",
+                                    "data": base64.b64encode(image.getvalue()).decode(),
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    ).encode()
+    session = SimpleNamespace(post=lambda *args, **kwargs: Response(raw, True))
+    with patch.object(adapter, "async_get_clientsession", return_value=session):
+        result = await hass.services.async_call(
+            "ai_task",
+            "generate_image",
+            {"entity_id": entity_id, "task_name": "audit", "instructions": "synthetic"},
+            blocking=True,
+            return_response=True,
+        )
+    assert result is not None
+    assert result["mime_type"] == "image/png"
+    assert result["width"] == 2
+    assert result["height"] == 3
+    assert result["model"] == "synthetic"
+    assert result["media_source_id"].startswith("media-source://ai_task/")
+    assert result["url"]
+    assert any(
+        path.read_bytes() == image.getvalue() for path in tmp_path.rglob("*.png")
+    )
+    assert await hass.config_entries.async_unload(entry.entry_id)

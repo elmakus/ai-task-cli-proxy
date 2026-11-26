@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -27,6 +28,10 @@ from .const import (
     DEFAULT_MODEL,
     DOMAIN,
 )
+
+from .http import async_read_bounded
+
+MAX_MODELS_RESPONSE_BYTES = 1024 * 1024
 
 
 def _normalize_base_url(value: str) -> str | None:
@@ -58,11 +63,25 @@ async def _async_check_connection(
             f"{base_url}/v1/models",
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=ClientTimeout(total=20),
+            allow_redirects=False,
         ) as response:
             response.raise_for_status()
+            if not 200 <= response.status < 300:
+                return "cannot_connect"
+            body = await async_read_bounded(response.content, MAX_MODELS_RESPONSE_BYTES)
+            result = json.loads(body)
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                return "cannot_connect"
+            if not all(
+                isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and item["id"].strip()
+                for item in result["data"]
+            ):
+                return "cannot_connect"
     except ClientResponseError as err:
         return "invalid_auth" if err.status in (401, 403) else "cannot_connect"
-    except (ClientError, TimeoutError, ValueError, OSError):
+    except (ClientError, TimeoutError, ValueError, OSError, RecursionError):
         return "cannot_connect"
     return None
 

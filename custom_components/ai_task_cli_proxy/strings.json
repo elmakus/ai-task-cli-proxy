@@ -3,19 +3,29 @@
     "step": {
       "user": {
         "title": "Connect to CLIProxyAPI",
-        "description": "Connect Home Assistant to the local CLIProxyAPI server for image generation.",
+        "description": "Connect to CLIProxyAPI. ChatGPT / GPT Image 2.6 Flare is the default, with transparent PNG output requested.",
         "data": {
           "base_url": "Base URL",
-          "api_key": "API key",
-          "model": "Image model"
+          "api_key": "API key"
+        },
+        "data_description": {
+          "base_url": "CLIProxyAPI server URL. Use HTTPS on untrusted networks.",
+          "api_key": "The proxy API key, not an upstream provider key."
         }
       },
       "reconfigure": {
         "title": "Change CLIProxyAPI server connection",
-        "description": "Leave API key blank to keep the existing key.",
+        "description": "Leave API key blank to keep it only when the server URL is unchanged. Enter the key explicitly for a new URL.",
         "data": {
           "base_url": "Base URL",
           "api_key": "New API key (optional)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate CLIProxyAPI",
+        "description": "Enter the API key for the existing CLIProxyAPI server.",
+        "data": {
+          "api_key": "API key"
         }
       }
     },
@@ -23,25 +33,59 @@
       "cannot_connect": "Failed to connect",
       "invalid_auth": "Invalid API key",
       "invalid_url": "Enter a valid HTTP or HTTPS URL without credentials or query parameters",
-      "invalid_model": "Enter a model name"
+      "model_unavailable": "The selected image model is not available in the proxy catalog.",
+      "key_required_for_new_url": "Enter an API key explicitly when changing the server URL."
     },
     "abort": {
       "already_configured": "This CLIProxyAPI server is already configured",
-      "reconfigure_successful": "CLIProxyAPI connection updated"
+      "reconfigure_successful": "CLIProxyAPI connection updated",
+      "reauth_successful": "CLIProxyAPI reauthenticated"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Image generation model",
-        "description": "Changes apply to the next image generation request. Changing the model does not change the server connection.",
+        "title": "Image provider settings",
+        "menu_options": {
+          "select_provider": "Select provider and model",
+          "refresh_models": "Refresh models",
+          "test_connection": "Test connection",
+          "background": "Background"
+        }
+      },
+      "select_provider": {
+        "title": "Select provider",
+        "description": "All providers use CLIProxyAPI. Antigravity and Google Paid API require explicit proxy prefixes; unverified image routes are not listed.",
+        "data": {
+          "provider": "Provider"
+        }
+      },
+      "model": {
+        "title": "Image model",
+        "description": "{provider}: {count} recognized image models. Google Paid API may incur charges. No automatic provider fallback.",
         "data": {
           "model": "Image model"
+        }
+      },
+      "background": {
+        "title": "Image background",
+        "description": "Transparent is the default for supported Images API models. Gemini has no verified native alpha parameter. No background removal is performed by this integration.",
+        "data": {
+          "background": "Background"
         }
       }
     },
     "error": {
-      "invalid_model": "Enter a model name"
+      "invalid_auth": "Enter a valid API key",
+      "cannot_connect": "Failed to retrieve the model catalog"
+    },
+    "abort": {
+      "invalid_model": "The selected model is not in the refreshed catalog.",
+      "cannot_connect": "Failed to retrieve the model catalog.",
+      "no_image_models": "No verified image routes are available for this provider. Antigravity and Google Paid API need explicit proxy prefixes. Existing selection was not changed.",
+      "connection_test_complete": "{provider}: connection successful. {count} recognized image models. Selected model: {selected}. No image was generated.",
+      "invalid_background": "Choose a supported background setting.",
+      "invalid_auth": "Invalid proxy API key. Reauthentication is required."
     }
   }
 }

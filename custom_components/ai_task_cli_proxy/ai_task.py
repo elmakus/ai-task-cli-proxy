@@ -23,7 +23,13 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import REQUEST_TIMEOUT_SECONDS
 
 from .http import ResponseTooLarge, async_read_bounded
-from .providers import PROXY_OPENAI, active_model, active_provider, provider_connection
+from .providers import (
+    active_background,
+    active_model,
+    active_provider,
+    model_protocol,
+    provider_connection,
+)
 
 MAX_ATTACHMENT_COUNT = 10
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -89,11 +95,14 @@ def _decode_image(encoded: str) -> bytes:
     return decoded
 
 
-def _serialize_openai_payload(model: str, parts: list[dict[str, Any]]) -> bytes:
+def _serialize_openai_payload(
+    model: str, parts: list[dict[str, Any]], background: str
+) -> bytes:
     """Encode a JSON Images API request; the installed proxy supports data URLs."""
     payload = {
         "model": model,
         "prompt": parts[0]["text"],
+        "background": background,
         "output_format": "png",
         "response_format": "b64_json",
         "n": 1,
@@ -221,11 +230,17 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
         task: ai_task.GenImageTask,
         chat_log: conversation.ChatLog,
     ) -> ai_task.GenImageTaskResult:
-        """Generate an image with CLIProxyAPI's Gemini-compatible endpoint."""
+        """Generate an image through the selected CLIProxyAPI route."""
         provider = active_provider(self._entry)
         model = active_model(self._entry)
         base_url, headers = provider_connection(self._entry, provider)
-        openai = provider == PROXY_OPENAI
+        protocol = model_protocol(provider, model)
+        if protocol is None:
+            raise HomeAssistantError(
+                "No verified image route for the selected provider and model"
+            )
+        openai = protocol == "openai"
+        background = active_background(self._entry)
         if openai:
             action = "edits" if task.attachments else "generations"
             endpoint = f"{base_url}/v1/images/{action}"
@@ -286,7 +301,7 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
         # Serialize the potentially large JSON payload off the event loop.
         if openai:
             body = await self.hass.async_add_executor_job(
-                _serialize_openai_payload, model, parts
+                _serialize_openai_payload, model, parts, background
             )
         else:
             body = await self.hass.async_add_executor_job(_serialize_payload, payload)

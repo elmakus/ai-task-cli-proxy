@@ -1,7 +1,7 @@
 # CLIProxyAPI Image Generation for Home Assistant
 
 A small Home Assistant **AI Task** adapter for generating images through a local
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) server with a Gemini-compatible endpoint.
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) server with OpenAI Images and Gemini-compatible endpoints.
 
 The integration exposes an image-generation AI Task entity which can be selected
 by integrations such as **Activity Images** and used through Home Assistant's
@@ -10,7 +10,7 @@ by integrations such as **Activity Images** and used through Home Assistant's
 ## Features
 
 - Native Home Assistant AI Task image generation.
-- Select Gemini / Antigravity or ChatGPT through CLIProxyAPI, or a separate direct Google API profile.
+- Select ChatGPT, Antigravity, Muse, OpenCode or Google Paid API through a single CLIProxyAPI connection.
 - Refresh the provider model catalog and show recognized image-generation models only.
 - Remember the selected model for each profile; never automatically fall back to paid Google API.
 - Gemini-compatible `/v1beta/models/{model}:generateContent` endpoint.
@@ -18,7 +18,8 @@ by integrations such as **Activity Images** and used through Home Assistant's
 - Change the image model later through **Options** without reinstalling.
 - Change server URL or API key through **Reconfigure**, preserving the existing entity.
 - HTTP response and image-size checks to prevent oversized provider payloads.
-- Configurable API server URL, API key, and model at initial setup.
+- Configurable proxy URL and API key at initial setup; default ChatGPT / GPT Image 2.6 Flare.
+- Transparent PNG requested by default for GPT Image; optional opaque or automatic background.
 - On-demand requests with a 180-second timeout.
 
 ## Installation via Home Assistant Marketplace (2026.11+)
@@ -37,38 +38,41 @@ may reference `ai_task.image_generation`.
 
 ## Configuration
 
-At initial setup, enter the CLIProxyAPI server URL, API key, and the
-Gemini-compatible image model. The server must be reachable from Home Assistant.
+At initial setup, enter the CLIProxyAPI server URL and API key. No separate
+upstream API key is needed in Home Assistant. New entries and legacy entries
+without an explicit provider select **ChatGPT / gpt-image-2.6-flare** by default.
+The existing entity ID is unchanged. This intentionally replaces the old
+implicit Gemini route; choose another provider explicitly if needed.
 
 Open **Settings → Devices & services → CLIProxyAPI Image Generation → Configure**
-to access **Select provider and model**, **Refresh models**, **Test connection**,
-and **Configure Google API key**. Refresh and connection checks only retrieve
-model catalogs; they do not generate images. Selecting a provider refreshes its
-catalog. Models are remembered per profile. The existing AI Task entity and
-configuration entry stay the same.
+for **Select provider and model**, **Refresh models**, **Test connection**,
+and **Background**. Catalog checks do not generate images. Selected models are
+remembered per provider. Background defaults to **transparent**; **opaque**
+and **auto** are also available. GPT Image requests include the background
+parameter and PNG output. The caller's prompt is preserved unchanged. Gemini
+does not have a verified native alpha parameter, so this setting does not
+guarantee transparency on that route. Images are returned unchanged, with no
+background removal or format conversion.
 
-The CLIProxyAPI profiles share the existing proxy URL and proxy API key. The
-proxy chooses the eligible account and applies its own routing and retry policy.
-The adapter uses the exact advertised model ID; unprefixed IDs cannot guarantee
-a particular upstream credential or provider if multiple routes offer the same
-ID. Use explicitly configured proxy model prefixes if upstream isolation is
-required.
+All profiles use the same proxy URL and API key. The proxy selects eligible
+accounts. For the two Gemini routes, configure and advertise unique proxy
+prefixes: `antigravity/` for Antigravity and `google-paid/` for paid Google.
+The paid profile accepts only `google-paid/gemini-3.1-flash-image`. Unprefixed
+Gemini IDs are deliberately rejected because the catalog owner alone does
+not establish which upstream account will be charged. No automatic provider
+fallback is implemented by the adapter. Proxy routing must preserve isolation.
 
-The separate Google API profile uses the official HTTPS Gemini endpoint and
-its own API key. Saving the key does not activate that profile. Selecting it
-explicitly enables potentially billable generation; no automatic fallback to
-it is performed.
-
-Model catalogs frequently lack reliable output-modality metadata. The picker
-conservatively recognizes supported Gemini image and GPT Image model families.
-Unknown model aliases, Muse text/vision models, and OpenCode Go models are not
-offered without verified image-generation support. Listing a model is not a
-guarantee of account quota, authorization, or successful generation.
+Only recognized supported image-generation families and matching provider
+metadata are offered. Models explicitly declaring non-image output are excluded.
+Muse and the current OpenCode Go plugin have no verified image transport and
+therefore show no models until such support is implemented. OpenCode Console
+image models are separate from the Go catalog. Listing a model does not prove
+quota, authorization or successful generation. Unknown aliases are not offered.
 
 The adapter selects Gemini generateContent or OpenAI Images (including JSON
 image edits with inline reference data) automatically. It never fetches a
-provider-returned image URL. Existing installations retain their original
-Gemini-compatible model until the operator selects a new route.
+provider-returned image URL. Neither a production prompt change nor an
+Activity Images integration update is required by this adapter.
 
 To change the **server URL or API key**, use **Reconfigure** on the same
 integration. The new connection is tested before it replaces the saved one.
@@ -76,8 +80,8 @@ Leave the API key empty to retain the existing key. The existing config
 entry and entity ID are kept.
 
 The config flow verifies connectivity to `/v1/models` and a valid model-list
-response (up to 1 MiB). Model names remain configurable, including aliases; the
-flow does not generate an image to verify model capabilities. HTTP redirects are
+response (up to 1 MiB). The flow does not generate an image to verify
+model capabilities. HTTP redirects are
 not followed. Use HTTPS if the connection crosses an untrusted network.
 
 Generated images are limited to 25 MiB and 25 million pixels, responses to

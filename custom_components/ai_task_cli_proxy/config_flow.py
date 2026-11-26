@@ -36,8 +36,10 @@ from .http import async_read_bounded
 from .providers import (
     CONF_PROVIDER,
     CONF_SAVED_MODELS,
-    CONF_GOOGLE_API_KEY,
-    GOOGLE_API,
+    CONF_BACKGROUND,
+    BACKGROUND_CHOICES,
+    active_background,
+    CHATGPT,
     PROVIDER_LABELS,
     active_provider,
     active_model,
@@ -118,12 +120,9 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             base_url = _normalize_base_url(user_input[CONF_BASE_URL])
             api_key = user_input[CONF_API_KEY]
-            model = user_input[CONF_MODEL].strip()
 
             if not base_url:
                 errors["base"] = "invalid_url"
-            elif not model:
-                errors[CONF_MODEL] = "invalid_model"
             else:
                 error = await _async_check_connection(self.hass, base_url, api_key)
                 if error:
@@ -137,7 +136,7 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data={
                             CONF_BASE_URL: base_url,
                             CONF_API_KEY: api_key,
-                            CONF_MODEL: model,
+                            CONF_MODEL: DEFAULT_MODEL,
                         },
                     )
 
@@ -150,10 +149,6 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_API_KEY): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.PASSWORD)
                 ),
-                vol.Required(
-                    CONF_MODEL,
-                    default=(user_input or {}).get(CONF_MODEL, DEFAULT_MODEL),
-                ): TextSelector(),
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
@@ -217,7 +212,7 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
                 "select_provider",
                 "refresh_models",
                 "test_connection",
-                "google_api",
+                "background",
             ],
         )
 
@@ -256,13 +251,12 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         provider = self._provider
         entry = self.config_entry
-        if provider == GOOGLE_API and not entry.options.get(CONF_GOOGLE_API_KEY):
-            return self.async_abort(reason="google_key_required")
         if user_input is not None:
             model = user_input[CONF_MODEL]
             if model not in self._models:
                 return self.async_abort(reason="invalid_model")
             options = dict(entry.options)
+            options.pop("google_api_key", None)
             saved = dict(options.get(CONF_SAVED_MODELS, {}))
             saved[active_provider(entry)] = active_model(entry)
             saved[provider] = model
@@ -281,7 +275,7 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
         current = (
             active_model(entry)
             if provider == active_provider(entry)
-            else saved.get(provider)
+            else saved.get(provider, DEFAULT_MODEL if provider == CHATGPT else None)
         )
         field = (
             vol.Required(CONF_MODEL, default=current)
@@ -319,37 +313,26 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
             },
         )
 
-    async def async_step_google_api(
+    async def async_step_background(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        errors = {}
         if user_input is not None:
-            key = user_input.get(
-                CONF_GOOGLE_API_KEY, ""
-            ).strip() or self.config_entry.options.get(CONF_GOOGLE_API_KEY)
-            if not key:
-                errors[CONF_GOOGLE_API_KEY] = "invalid_auth"
-            else:
-                try:
-                    await async_list_models(
-                        self.hass, self.config_entry, GOOGLE_API, google_key=key
-                    )
-                except HomeAssistantError:
-                    errors["base"] = "cannot_connect"
-                else:
-                    # Saving the key never activates the paid route.
-                    return self.async_create_entry(
-                        title="",
-                        data={**self.config_entry.options, CONF_GOOGLE_API_KEY: key},
-                    )
+            value = user_input[CONF_BACKGROUND]
+            if value not in BACKGROUND_CHOICES:
+                return self.async_abort(reason="invalid_background")
+            options = dict(self.config_entry.options)
+            options.pop("google_api_key", None)
+            options[CONF_BACKGROUND] = value
+            return self.async_create_entry(title="", data=options)
         return self.async_show_form(
-            step_id="google_api",
+            step_id="background",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(CONF_GOOGLE_API_KEY): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    vol.Required(
+                        CONF_BACKGROUND, default=active_background(self.config_entry)
+                    ): SelectSelector(
+                        SelectSelectorConfig(options=list(BACKGROUND_CHOICES))
                     )
                 }
             ),
-            errors=errors,
         )

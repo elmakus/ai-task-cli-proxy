@@ -72,6 +72,10 @@ async def test_actual_ha_result(hass, split):
             "model": "synthetic",
             "api_key": "fake",
         },
+        options={
+            "provider": "antigravity",
+            "model": "antigravity/gemini-3.1-flash-image",
+        },
     )
     entity = adapter.CLIProxyAPIImageTaskEntity(entry)
     entity.hass = hass
@@ -105,6 +109,10 @@ async def test_native_service(hass, enable_custom_integrations, tmp_path):
             "base_url": "http://unused.invalid",
             "model": "synthetic",
             "api_key": "fake",
+        },
+        options={
+            "provider": "antigravity",
+            "model": "antigravity/gemini-3.1-flash-image",
         },
     )
     entry.add_to_hass(hass)
@@ -149,7 +157,7 @@ async def test_native_service(hass, enable_custom_integrations, tmp_path):
     assert result["mime_type"] == "image/png"
     assert result["width"] == 2
     assert result["height"] == 3
-    assert result["model"] == "synthetic"
+    assert result["model"] == "antigravity/gemini-3.1-flash-image"
     assert result["media_source_id"].startswith("media-source://ai_task/")
     assert result["url"]
     assert any(
@@ -174,7 +182,11 @@ async def test_native_options_flow(hass, enable_custom_integrations, tmp_path):
             "model": "gemini-3.1-flash-image",
             "api_key": "fake",
         },
-        options={"google_api_key": "fake-google"},
+        options={
+            "provider": "antigravity",
+            "model": "antigravity/gemini-3.1-flash-image",
+            "background": "transparent",
+        },
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -187,8 +199,8 @@ async def test_native_options_flow(hass, enable_custom_integrations, tmp_path):
     async def catalog(_hass, _entry, provider, **kwargs):
         return (
             ["gpt-image-2"]
-            if provider == providers.PROXY_OPENAI
-            else ["gemini-3.1-flash-image"]
+            if provider == providers.CHATGPT
+            else ["antigravity/gemini-3.1-flash-image"]
         )
 
     with patch.object(config_flow, "async_list_models", side_effect=catalog):
@@ -200,7 +212,7 @@ async def test_native_options_flow(hass, enable_custom_integrations, tmp_path):
         )
         assert result["step_id"] == "select_provider"
         result = await hass.config_entries.options.async_configure(
-            flow_id, {"provider": providers.PROXY_OPENAI}
+            flow_id, {"provider": providers.CHATGPT}
         )
         assert result["step_id"] == "model"
         result = await hass.config_entries.options.async_configure(
@@ -208,15 +220,80 @@ async def test_native_options_flow(hass, enable_custom_integrations, tmp_path):
         )
         assert result["type"] == "create_entry"
     await hass.async_block_till_done()
-    assert entry.options["provider"] == providers.PROXY_OPENAI
+    assert entry.options["provider"] == providers.CHATGPT
     assert entry.options["model"] == "gpt-image-2"
-    assert entry.options["google_api_key"] == "fake-google"
+    assert entry.options["background"] == "transparent"
     assert (
-        entry.options["saved_models"][providers.PROXY_GEMINI]
-        == "gemini-3.1-flash-image"
+        entry.options["saved_models"][providers.ANTIGRAVITY]
+        == "antigravity/gemini-3.1-flash-image"
     )
     assert (
         registry.async_get_entity_id("ai_task", "ai_task_cli_proxy", entry.entry_id)
         == entity_id
+    )
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_native_default_transparent_png(
+    hass, enable_custom_integrations, tmp_path
+):
+    """An upgraded legacy entry uses GPT Image and returns unmodified RGBA bytes."""
+    from homeassistant.setup import async_setup_component
+    from homeassistant.helpers import entity_registry as er
+
+    hass.config.media_dirs = {"local": str(tmp_path)}
+    assert await async_setup_component(hass, "homeassistant", {})
+    entry = MockConfigEntry(
+        domain="ai_task_cli_proxy",
+        title="CLIProxyAPI Images",
+        data={
+            "base_url": "http://unused.invalid",
+            "model": "gemini-3.1-flash-image",
+            "api_key": "fake",
+        },
+        options={"model": "gemini-3.1-flash-image"},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "ai_task", "ai_task_cli_proxy", entry.entry_id
+    )
+    assert entity_id is not None
+    image = BytesIO()
+    rgba = Image.new("RGBA", (3, 3), (0, 0, 0, 0))
+    rgba.putpixel((1, 1), (255, 100, 20, 255))
+    rgba.save(image, format="PNG")
+    raw = json.dumps(
+        {
+            "data": [{"b64_json": base64.b64encode(image.getvalue()).decode()}],
+            "output_format": "png",
+        }
+    ).encode()
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append((url, json.loads(kwargs["data"])))
+        return Response(raw, True)
+
+    with patch.object(
+        adapter, "async_get_clientsession", return_value=SimpleNamespace(post=post)
+    ):
+        result = await hass.services.async_call(
+            "ai_task",
+            "generate_image",
+            {"entity_id": entity_id, "task_name": "audit", "instructions": "synthetic"},
+            blocking=True,
+            return_response=True,
+        )
+    assert result["model"] == "gpt-image-2.6-flare"
+    assert len(calls) == 1
+    assert calls[0][0] == "http://unused.invalid/v1/images/generations"
+    assert calls[0][1]["background"] == "transparent"
+    assert calls[0][1]["output_format"] == "png"
+    assert calls[0][1]["prompt"] == "synthetic"
+    assert any(
+        path.read_bytes() == image.getvalue() for path in tmp_path.rglob("*.png")
     )
     assert await hass.config_entries.async_unload(entry.entry_id)

@@ -3,11 +3,10 @@
     "step": {
       "user": {
         "title": "Connect to CLIProxyAPI",
-        "description": "Connect Home Assistant to the local CLIProxyAPI server for image generation.",
+        "description": "Connect to CLIProxyAPI. ChatGPT / GPT Image 2.6 Flare is the default, with transparent PNG output requested.",
         "data": {
           "base_url": "Base URL",
-          "api_key": "API key",
-          "model": "Image model"
+          "api_key": "API key"
         }
       },
       "reconfigure": {
@@ -38,28 +37,28 @@
           "select_provider": "Select provider and model",
           "refresh_models": "Refresh models",
           "test_connection": "Test connection",
-          "google_api": "Configure Google API key"
+          "background": "Background"
         }
       },
       "select_provider": {
         "title": "Select provider",
-        "description": "CLIProxyAPI chooses the account. Unprefixed models use the proxy routing policy. Google API is a separate paid route.",
+        "description": "All providers use CLIProxyAPI. Antigravity and Google Paid API require explicit proxy prefixes; unverified image routes are not listed.",
         "data": {
           "provider": "Provider"
         }
       },
       "model": {
         "title": "Image model",
-        "description": "{provider}: {count} recognized image models. Google API generation may incur charges. No automatic fallback.",
+        "description": "{provider}: {count} recognized image models. Google Paid API may incur charges. No automatic provider fallback.",
         "data": {
           "model": "Image model"
         }
       },
-      "google_api": {
-        "title": "Configure Google API key",
-        "description": "Enter a Google Gemini API key. Leave blank to retain an existing key. Connection testing does not generate images; saving this key does not switch providers.",
+      "background": {
+        "title": "Image background",
+        "description": "Transparent is the default for supported Images API models. Gemini has no verified native alpha parameter. No background removal is performed by this integration.",
         "data": {
-          "google_api_key": "Google API key"
+          "background": "Background"
         }
       }
     },
@@ -68,11 +67,11 @@
       "cannot_connect": "Failed to retrieve the model catalog"
     },
     "abort": {
-      "google_key_required": "Configure the Google API key first.",
       "invalid_model": "The selected model is not in the refreshed catalog.",
       "cannot_connect": "Failed to retrieve the model catalog.",
-      "no_image_models": "No recognized image generation models are available. Existing selection was not changed.",
-      "connection_test_complete": "{provider}: connection successful. {count} recognized image models. Selected model: {selected}. No image was generated."
+      "no_image_models": "No verified image routes are available for this provider. Antigravity and Google Paid API need explicit proxy prefixes. Existing selection was not changed.",
+      "connection_test_complete": "{provider}: connection successful. {count} recognized image models. Selected model: {selected}. No image was generated.",
+      "invalid_background": "Choose a supported background setting."
     }
   }
 }

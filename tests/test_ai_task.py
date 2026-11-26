@@ -55,6 +55,14 @@ class _ConfigFlow:
 
 
 class _OptionsFlow:
+    hass = None
+
+    def async_show_menu(self, **kwargs):
+        return {"type": "menu", **kwargs}
+
+    def async_abort(self, **kwargs):
+        return {"type": "abort", **kwargs}
+
     def async_show_form(self, **kwargs):
         return {"type": "form", **kwargs}
 
@@ -123,6 +131,8 @@ def _install_home_assistant_stubs() -> None:
     modules["homeassistant.core"].callback = lambda fn: fn
 
     selectors = modules["homeassistant.helpers.selector"]
+    selectors.SelectSelector = lambda _config=None: str
+    selectors.SelectSelectorConfig = lambda **kwargs: SimpleNamespace(**kwargs)
     selectors.TextSelector = lambda _config=None: str
     selectors.TextSelectorConfig = lambda **kwargs: SimpleNamespace(**kwargs)
     selectors.TextSelectorType = SimpleNamespace(URL="url", PASSWORD="password")
@@ -576,20 +586,30 @@ def test_can_find_image_in_second_candidate(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_options_flow_keeps_existing_model(monkeypatch: pytest.MonkeyPatch):
-    from custom_components.ai_task_cli_proxy.config_flow import CLIProxyAPIOptionsFlow
+    from custom_components.ai_task_cli_proxy import config_flow, providers
 
-    flow = CLIProxyAPIOptionsFlow()
+    flow = config_flow.CLIProxyAPIOptionsFlow()
     flow.config_entry = SimpleNamespace(
         data={"model": "original-model"}, options={"model": "chosen-model"}
     )
-    form = asyncio.run(flow.async_step_init())
-    assert form["type"] == "form"
-    assert form["step_id"] == "init"
+
+    async def catalog(hass, entry, provider, **kwargs):
+        assert provider == providers.PROXY_GEMINI
+        return ["chosen-model", "new-model"]
+
+    monkeypatch.setattr(config_flow, "async_list_models", catalog)
+    menu = asyncio.run(flow.async_step_init())
+    assert menu["type"] == "menu"
+    assert "refresh_models" in menu["menu_options"]
+    form = asyncio.run(flow.async_step_refresh_models())
+    assert form["step_id"] == "model"
     assert form["data_schema"]({})["model"] == "chosen-model"
-    saved = asyncio.run(flow.async_step_init({"model": " new-model "}))
-    assert saved == {"type": "create_entry", "data": {"model": "new-model"}}
-    invalid = asyncio.run(flow.async_step_init({"model": "  "}))
-    assert invalid["errors"]["model"] == "invalid_model"
+    saved = asyncio.run(flow.async_step_model({"model": "new-model"}))
+    assert saved["data"]["model"] == "new-model"
+    assert saved["data"]["provider"] == providers.PROXY_GEMINI
+    assert saved["data"]["saved_models"] == {providers.PROXY_GEMINI: "new-model"}
+    invalid = asyncio.run(flow.async_step_model({"model": "not-in-catalog"}))
+    assert invalid["reason"] == "invalid_model"
 
 
 def test_reconfigure_keeps_entry_id_and_old_key(monkeypatch: pytest.MonkeyPatch):
@@ -801,3 +821,300 @@ def test_english_translations_match_strings():
     assert json.loads((root / "strings.json").read_text()) == json.loads(
         (root / "translations/en.json").read_text()
     )
+
+
+def test_filter_image_models():
+    from custom_components.ai_task_cli_proxy import providers
+
+    rows = [
+        {"id": "gemini-3.1-flash-image", "owned_by": "antigravity"},
+        {"id": "antigravity/gemini-3-pro-image-preview", "owned_by": "antigravity"},
+        {"id": "gemini-3.1-pro-preview", "owned_by": "google"},
+        {"id": "gpt-image-2.6-flare", "owned_by": "openai"},
+        {"id": "gpt-5.6-luna", "owned_by": "openai"},
+        {"id": "muse-spark-1.3", "owned_by": "meta"},
+        {"id": "opencode-go/gpt-image-2", "owned_by": "opencode-go"},
+        {"id": "unknown-image", "owned_by": "openai"},
+    ]
+    assert providers.filter_models(rows, providers.PROXY_GEMINI) == [
+        "antigravity/gemini-3-pro-image-preview",
+        "gemini-3.1-flash-image",
+    ]
+    assert providers.filter_models(rows, providers.PROXY_OPENAI) == [
+        "gpt-image-2.6-flare"
+    ]
+    google = [
+        {
+            "name": "models/gemini-3.1-flash-image",
+            "supportedGenerationMethods": ["generateContent"],
+        },
+        {
+            "name": "models/gemini-3.1-flash-lite-image",
+            "supportedGenerationMethods": ["countTokens"],
+        },
+        {
+            "name": "models/gemini-3.1-pro-preview",
+            "supportedGenerationMethods": ["generateContent"],
+        },
+    ]
+    assert providers.filter_models(google, providers.GOOGLE_API) == [
+        "gemini-3.1-flash-image"
+    ]
+
+
+@pytest.mark.parametrize("with_reference", [False, True])
+def test_openai_images_api(monkeypatch, tmp_path, with_reference):
+    from custom_components.ai_task_cli_proxy import providers
+
+    entity = _entity_for_test()
+    entity._entry.options = {
+        "provider": providers.PROXY_OPENAI,
+        "model": "gpt-image-2.6",
+    }
+    response = _ControlledResponse(
+        {"data": [{"b64_json": base64.b64encode(PNG).decode()}], "output_format": "png"}
+    )
+    session = _ControlledSession(response)
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _: session)
+    task = _task_for_test()
+    if with_reference:
+        ref = tmp_path / "ref.png"
+        ref.write_bytes(PNG)
+        task.attachments = [SimpleNamespace(path=ref, mime_type="image/png")]
+    result = asyncio.run(entity._async_generate_image(task, _FakeChatLog()))
+    assert result.image_data == PNG
+    assert result.model == "gpt-image-2.6"
+    endpoint = session.endpoint
+    assert endpoint.endswith(
+        "/v1/images/" + ("edits" if with_reference else "generations")
+    )
+    assert session.payload["model"] == "gpt-image-2.6"
+    if with_reference:
+        assert session.payload["images"] == [
+            {"image_url": "data:image/png;base64," + base64.b64encode(PNG).decode()}
+        ]
+
+
+def test_google_direct_uses_separate_credentials(monkeypatch):
+    from custom_components.ai_task_cli_proxy import providers
+
+    entity = _entity_for_test()
+    entity._entry.options = {
+        "provider": providers.GOOGLE_API,
+        "model": "gemini-3.1-flash-image",
+        "google_api_key": "test-google-key",
+    }
+    session = _ControlledSession(_ControlledResponse(_generated_response()))
+    monkeypatch.setattr(integration, "async_get_clientsession", lambda _: session)
+    result = asyncio.run(entity._async_generate_image(_task_for_test(), _FakeChatLog()))
+    assert result.image_data == PNG
+    assert (
+        session.endpoint
+        == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent"
+    )
+    assert session.headers["x-goog-api-key"] == "test-google-key"
+    assert "Authorization" not in session.headers
+
+
+def test_save_google_key_never_switches_provider(monkeypatch):
+    from custom_components.ai_task_cli_proxy import config_flow, providers
+
+    flow = config_flow.CLIProxyAPIOptionsFlow()
+    flow.config_entry = SimpleNamespace(
+        data={"model": "gemini-3.1-flash-image"}, options={}
+    )
+
+    async def catalog(hass, entry, provider, *, google_key=None):
+        assert provider == providers.GOOGLE_API
+        assert google_key == "test-google-key"
+        return ["gemini-3.1-flash-image"]
+
+    monkeypatch.setattr(config_flow, "async_list_models", catalog)
+    saved = asyncio.run(
+        flow.async_step_google_api({"google_api_key": "test-google-key"})
+    )
+    assert saved["data"] == {"google_api_key": "test-google-key"}
+    flow.config_entry.options = saved["data"]
+    assert providers.active_provider(flow.config_entry) == providers.PROXY_GEMINI
+
+
+def test_switch_profiles_remembers_models(monkeypatch):
+    from custom_components.ai_task_cli_proxy import config_flow, providers
+
+    flow = config_flow.CLIProxyAPIOptionsFlow()
+    flow.config_entry = SimpleNamespace(
+        data={"model": "gemini-3.1-flash-image"},
+        options={"google_api_key": "test-google-key"},
+    )
+
+    async def catalog(hass, entry, provider, **kwargs):
+        return (
+            ["gpt-image-2.6"]
+            if provider == providers.PROXY_OPENAI
+            else ["gemini-3.1-flash-image"]
+        )
+
+    monkeypatch.setattr(config_flow, "async_list_models", catalog)
+    asyncio.run(flow.async_step_select_provider({"provider": providers.PROXY_OPENAI}))
+    saved = asyncio.run(flow.async_step_model({"model": "gpt-image-2.6"}))
+    flow.config_entry.options = saved["data"]
+    assert providers.active_provider(flow.config_entry) == providers.PROXY_OPENAI
+    assert (
+        saved["data"]["saved_models"][providers.PROXY_GEMINI]
+        == "gemini-3.1-flash-image"
+    )
+    form = asyncio.run(
+        flow.async_step_select_provider({"provider": providers.PROXY_GEMINI})
+    )
+    assert form["data_schema"]({})["model"] == "gemini-3.1-flash-image"
+    saved = asyncio.run(flow.async_step_model({"model": "gemini-3.1-flash-image"}))
+    assert saved["data"]["saved_models"][providers.PROXY_OPENAI] == "gpt-image-2.6"
+    assert saved["data"]["google_api_key"] == "test-google-key"
+
+
+def test_google_not_configured():
+    from custom_components.ai_task_cli_proxy import config_flow, providers
+
+    flow = config_flow.CLIProxyAPIOptionsFlow()
+    flow.config_entry = SimpleNamespace(
+        data={"model": "gemini-3.1-flash-image"}, options={}
+    )
+    result = asyncio.run(
+        flow.async_step_select_provider({"provider": providers.GOOGLE_API})
+    )
+    assert result["reason"] == "google_key_required"
+
+
+def test_proxy_refresh_filters_live_catalog(monkeypatch):
+    from custom_components.ai_task_cli_proxy import providers
+
+    entry = _entity_for_test()._entry
+    response = _ControlledResponse(
+        {
+            "data": [
+                {"id": "gemini-3.1-flash-image", "owned_by": "antigravity"},
+                {"id": "gemini-4-argon-high", "owned_by": "antigravity"},
+            ]
+        }
+    )
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return response
+
+    monkeypatch.setattr(
+        providers, "async_get_clientsession", lambda _: SimpleNamespace(get=get)
+    )
+    assert asyncio.run(
+        providers.async_list_models(None, entry, providers.PROXY_GEMINI)
+    ) == ["gemini-3.1-flash-image"]
+    assert len(calls) == 1
+    assert calls[0][0] == "http://cliproxy.invalid/v1/models"
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer not-a-real-key"}
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_google_refresh_paginates_without_proxy_credentials(monkeypatch):
+    from custom_components.ai_task_cli_proxy import providers
+
+    entry = _entity_for_test()._entry
+    entry.options = {"google_api_key": "fake-google-key"}
+    pages = iter(
+        [
+            _ControlledResponse(
+                {
+                    "models": [
+                        {
+                            "name": "models/gemini-3.1-flash-image",
+                            "supportedGenerationMethods": ["generateContent"],
+                        }
+                    ],
+                    "nextPageToken": "next",
+                }
+            ),
+            _ControlledResponse(
+                {
+                    "models": [
+                        {
+                            "name": "models/gemini-3-pro-image-preview",
+                            "supportedGenerationMethods": ["generateContent"],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return next(pages)
+
+    monkeypatch.setattr(
+        providers, "async_get_clientsession", lambda _: SimpleNamespace(get=get)
+    )
+    assert asyncio.run(
+        providers.async_list_models(None, entry, providers.GOOGLE_API)
+    ) == [
+        "gemini-3-pro-image-preview",
+        "gemini-3.1-flash-image",
+    ]
+    assert len(calls) == 2
+    for url, kwargs in calls:
+        assert url == "https://generativelanguage.googleapis.com/v1beta/models"
+        assert kwargs["headers"] == {"x-goog-api-key": "fake-google-key"}
+        assert kwargs["allow_redirects"] is False
+    assert calls[1][1]["params"] == {"pageSize": "100", "pageToken": "next"}
+
+
+def test_openai_does_not_fetch_image_url():
+    raw = bytearray(
+        json.dumps({"data": [{"url": "https://unused.invalid/image.png"}]}).encode()
+    )
+    with pytest.raises(RuntimeError, match="inline image"):
+        integration._parse_response(raw, True)
+
+
+def test_proxy_failure_does_not_fall_back_to_paid_api(monkeypatch):
+    from aiohttp import ClientResponseError
+    from custom_components.ai_task_cli_proxy import providers
+
+    entity = _entity_for_test()
+    entity._entry.options = {"google_api_key": "unused-paid-key"}
+    session = _ControlledSession(
+        _ControlledResponse(error=ClientResponseError(None, (), status=503))
+    )
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return session.post(*args, **kwargs)
+
+    monkeypatch.setattr(
+        integration, "async_get_clientsession", lambda _: SimpleNamespace(post=post)
+    )
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        asyncio.run(entity._async_generate_image(_task_for_test(), _FakeChatLog()))
+    assert providers.active_provider(entity._entry) == providers.PROXY_GEMINI
+    assert len(calls) == 1
+    assert calls[0][0][0].startswith("http://cliproxy.invalid/")
+    assert "x-goog-api-key" not in calls[0][1]["headers"]
+
+
+def test_test_connection_is_read_only(monkeypatch):
+    from custom_components.ai_task_cli_proxy import config_flow, providers
+
+    flow = config_flow.CLIProxyAPIOptionsFlow()
+    options = {"model": "gemini-3.1-flash-image"}
+    flow.config_entry = SimpleNamespace(data={"model": "legacy"}, options=options)
+
+    async def catalog(hass, entry, provider, **kwargs):
+        assert provider == providers.PROXY_GEMINI
+        return ["gemini-3.1-flash-image"]
+
+    monkeypatch.setattr(config_flow, "async_list_models", catalog)
+    result = asyncio.run(flow.async_step_test_connection())
+    assert result["reason"] == "connection_test_complete"
+    assert result["description_placeholders"]["selected"] == "Available"
+    assert flow.config_entry.options == options

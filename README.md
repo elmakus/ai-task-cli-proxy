@@ -10,6 +10,9 @@ by integrations such as **Activity Images** and used through Home Assistant's
 ## Features
 
 - Native Home Assistant AI Task image generation.
+- Select Gemini / Antigravity or ChatGPT through CLIProxyAPI, or a separate direct Google API profile.
+- Refresh the provider model catalog and show recognized image-generation models only.
+- Remember the selected model for each profile; never automatically fall back to paid Google API.
 - Gemini-compatible `/v1beta/models/{model}:generateContent` endpoint.
 - Optional reference-image attachments (up to 10 files and 20 MB total input).
 - Change the image model later through **Options** without reinstalling.
@@ -37,9 +40,35 @@ may reference `ai_task.image_generation`.
 At initial setup, enter the CLIProxyAPI server URL, API key, and the
 Gemini-compatible image model. The server must be reachable from Home Assistant.
 
-To change the **image model**, go to **Settings → Devices & services →
-CLIProxyAPI Image Generation → Configure** (Options Flow). The next image
-request uses the new model; the existing AI Task entity ID is preserved.
+Open **Settings → Devices & services → CLIProxyAPI Image Generation → Configure**
+to access **Select provider and model**, **Refresh models**, **Test connection**,
+and **Configure Google API key**. Refresh and connection checks only retrieve
+model catalogs; they do not generate images. Selecting a provider refreshes its
+catalog. Models are remembered per profile. The existing AI Task entity and
+configuration entry stay the same.
+
+The CLIProxyAPI profiles share the existing proxy URL and proxy API key. The
+proxy chooses the eligible account and applies its own routing and retry policy.
+The adapter uses the exact advertised model ID; unprefixed IDs cannot guarantee
+a particular upstream credential or provider if multiple routes offer the same
+ID. Use explicitly configured proxy model prefixes if upstream isolation is
+required.
+
+The separate Google API profile uses the official HTTPS Gemini endpoint and
+its own API key. Saving the key does not activate that profile. Selecting it
+explicitly enables potentially billable generation; no automatic fallback to
+it is performed.
+
+Model catalogs frequently lack reliable output-modality metadata. The picker
+conservatively recognizes supported Gemini image and GPT Image model families.
+Unknown model aliases, Muse text/vision models, and OpenCode Go models are not
+offered without verified image-generation support. Listing a model is not a
+guarantee of account quota, authorization, or successful generation.
+
+The adapter selects Gemini generateContent or OpenAI Images (including JSON
+image edits with inline reference data) automatically. It never fetches a
+provider-returned image URL. Existing installations retain their original
+Gemini-compatible model until the operator selects a new route.
 
 To change the **server URL or API key**, use **Reconfigure** on the same
 integration. The new connection is tested before it replaces the saved one.

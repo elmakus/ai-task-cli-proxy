@@ -15,15 +15,15 @@ from PIL import Image
 
 from homeassistant.components import ai_task, conversation
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import CONF_BASE_URL, CONF_MODEL, REQUEST_TIMEOUT_SECONDS
+from .const import REQUEST_TIMEOUT_SECONDS
 
 from .http import ResponseTooLarge, async_read_bounded
+from .providers import PROXY_OPENAI, active_model, active_provider, provider_connection
 
 MAX_ATTACHMENT_COUNT = 10
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -72,7 +72,48 @@ def _validate_image(data: bytes, mime_type: str) -> tuple[int, int]:
     return width, height
 
 
-def _parse_response(raw_response: bytearray) -> tuple[bytes, str, str, int, int]:
+def _decode_image(encoded: str) -> bytes:
+    """Decode a bounded inline image without accepting remote image URLs."""
+    if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 4:
+        raise HomeAssistantError(
+            "CLIProxyAPI generated image exceeds the 25 MB size limit"
+        )
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as err:
+        raise HomeAssistantError("CLIProxyAPI returned invalid image data") from err
+    if len(decoded) > MAX_IMAGE_BYTES:
+        raise HomeAssistantError(
+            "CLIProxyAPI generated image exceeds the 25 MB size limit"
+        )
+    return decoded
+
+
+def _serialize_openai_payload(model: str, parts: list[dict[str, Any]]) -> bytes:
+    """Encode a JSON Images API request; the installed proxy supports data URLs."""
+    payload = {
+        "model": model,
+        "prompt": parts[0]["text"],
+        "output_format": "png",
+        "response_format": "b64_json",
+        "n": 1,
+    }
+    if len(parts) > 1:
+        payload["images"] = [
+            {
+                "image_url": "data:"
+                + part["inlineData"]["mimeType"]
+                + ";base64,"
+                + part["inlineData"]["data"]
+            }
+            for part in parts[1:]
+        ]
+    return _serialize_payload(payload)
+
+
+def _parse_response(
+    raw_response: bytearray, openai: bool = False
+) -> tuple[bytes, str, str, int, int]:
     """Parse bounded provider JSON and validate its first returned image."""
     try:
         result: Any = json.loads(raw_response)
@@ -80,6 +121,34 @@ def _parse_response(raw_response: bytearray) -> tuple[bytes, str, str, int, int]
         raise HomeAssistantError("CLIProxyAPI returned invalid JSON") from err
     if not isinstance(result, dict):
         raise HomeAssistantError("CLIProxyAPI returned an invalid response")
+
+    if openai:
+        images = result.get("data")
+        if (
+            not isinstance(images, list)
+            or not images
+            or not isinstance(images[0], dict)
+        ):
+            raise HomeAssistantError("CLIProxyAPI response did not include an image")
+        encoded = images[0].get("b64_json")
+        if not isinstance(encoded, str):
+            raise HomeAssistantError(
+                "CLIProxyAPI response did not include an inline image"
+            )
+        data = _decode_image(encoded)
+        format_name = result.get("output_format") or "png"
+        mime = (
+            {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}.get(
+                format_name
+            )
+            if isinstance(format_name, str)
+            else None
+        )
+        if mime is None:
+            raise HomeAssistantError("CLIProxyAPI returned an unsupported image format")
+        width, height = _validate_image(data, mime)
+        revised = images[0].get("revised_prompt")
+        return data, mime, revised if isinstance(revised, str) else "", width, height
 
     response_text: list[str] = []
     image_bytes: bytes | None = None
@@ -111,21 +180,7 @@ def _parse_response(raw_response: bytearray) -> tuple[bytes, str, str, int, int]
                     and isinstance(candidate_mime, str)
                     and candidate_mime.startswith("image/")
                 ):
-                    if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 4:
-                        raise HomeAssistantError(
-                            "CLIProxyAPI generated image exceeds the 25 MB size limit"
-                        )
-                    try:
-                        decoded = base64.b64decode(encoded, validate=True)
-                    except (binascii.Error, ValueError) as err:
-                        raise HomeAssistantError(
-                            "CLIProxyAPI returned invalid image data"
-                        ) from err
-                    if len(decoded) > MAX_IMAGE_BYTES:
-                        raise HomeAssistantError(
-                            "CLIProxyAPI generated image exceeds the 25 MB size limit"
-                        )
-                    image_bytes = decoded
+                    image_bytes = _decode_image(encoded)
                     mime_type = candidate_mime
             elif isinstance(part.get("text"), str):
                 response_text.append(part["text"])
@@ -167,10 +222,17 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
         chat_log: conversation.ChatLog,
     ) -> ai_task.GenImageTaskResult:
         """Generate an image with CLIProxyAPI's Gemini-compatible endpoint."""
-        base_url = self._entry.data[CONF_BASE_URL].rstrip("/")
-        model = self._entry.options.get(CONF_MODEL, self._entry.data[CONF_MODEL])
-        api_key = self._entry.data[CONF_API_KEY]
-        endpoint = f"{base_url}/v1beta/models/{quote(model, safe='')}:generateContent"
+        provider = active_provider(self._entry)
+        model = active_model(self._entry)
+        base_url, headers = provider_connection(self._entry, provider)
+        openai = provider == PROXY_OPENAI
+        if openai:
+            action = "edits" if task.attachments else "generations"
+            endpoint = f"{base_url}/v1/images/{action}"
+        else:
+            endpoint = (
+                f"{base_url}/v1beta/models/{quote(model, safe='')}:generateContent"
+            )
         parts: list[dict[str, Any]] = [{"text": task.instructions}]
         if task.attachments:
             if len(task.attachments) > MAX_ATTACHMENT_COUNT:
@@ -222,14 +284,16 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
         }
 
         # Serialize the potentially large JSON payload off the event loop.
-        body = await self.hass.async_add_executor_job(_serialize_payload, payload)
+        if openai:
+            body = await self.hass.async_add_executor_job(
+                _serialize_openai_payload, model, parts
+            )
+        else:
+            body = await self.hass.async_add_executor_job(_serialize_payload, payload)
         try:
             async with async_get_clientsession(self.hass).post(
                 endpoint,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers={**headers, "Content-Type": "application/json"},
                 data=body,
                 allow_redirects=False,
                 timeout=ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
@@ -262,7 +326,9 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
             response_text,
             width,
             height,
-        ) = await self.hass.async_add_executor_job(_parse_response, raw_response)
+        ) = await self.hass.async_add_executor_job(
+            _parse_response, raw_response, openai
+        )
 
         chat_log.async_add_assistant_content_without_tools(
             conversation.AssistantContent(

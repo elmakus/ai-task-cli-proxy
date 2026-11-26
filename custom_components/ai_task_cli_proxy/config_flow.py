@@ -13,9 +13,12 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -30,6 +33,16 @@ from .const import (
 )
 
 from .http import async_read_bounded
+from .providers import (
+    CONF_PROVIDER,
+    CONF_SAVED_MODELS,
+    CONF_GOOGLE_API_KEY,
+    GOOGLE_API,
+    PROVIDER_LABELS,
+    active_provider,
+    active_model,
+    async_list_models,
+)
 
 MAX_MODELS_RESPONSE_BYTES = 1024 * 1024
 
@@ -193,29 +206,150 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
-    """Allow changing the image model with no reload or loss of entity IDs."""
+    """Select and remember image routes without reloading the AI Task entity."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Update the image model used by subsequent requests."""
-        errors: dict[str, str] = {}
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=[
+                "select_provider",
+                "refresh_models",
+                "test_connection",
+                "google_api",
+            ],
+        )
 
+    async def async_step_select_provider(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         if user_input is not None:
-            model = user_input[CONF_MODEL].strip()
-            if model:
-                return self.async_create_entry(data={CONF_MODEL: model})
-            errors[CONF_MODEL] = "invalid_model"
+            self._provider = user_input[CONF_PROVIDER]
+            return await self.async_step_model()
+        return self.async_show_form(
+            step_id="select_provider",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_PROVIDER, default=active_provider(self.config_entry)
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                {"value": key, "label": label}
+                                for key, label in PROVIDER_LABELS.items()
+                            ]
+                        )
+                    )
+                }
+            ),
+        )
 
-        current_model = self.config_entry.options.get(
-            CONF_MODEL, self.config_entry.data[CONF_MODEL]
+    async def async_step_refresh_models(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        self._provider = active_provider(self.config_entry)
+        return await self.async_step_model()
+
+    async def async_step_model(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        provider = self._provider
+        entry = self.config_entry
+        if provider == GOOGLE_API and not entry.options.get(CONF_GOOGLE_API_KEY):
+            return self.async_abort(reason="google_key_required")
+        if user_input is not None:
+            model = user_input[CONF_MODEL]
+            if model not in self._models:
+                return self.async_abort(reason="invalid_model")
+            options = dict(entry.options)
+            saved = dict(options.get(CONF_SAVED_MODELS, {}))
+            saved[active_provider(entry)] = active_model(entry)
+            saved[provider] = model
+            options.update(
+                {CONF_PROVIDER: provider, CONF_MODEL: model, CONF_SAVED_MODELS: saved}
+            )
+            return self.async_create_entry(title="", data=options)
+
+        try:
+            self._models = await async_list_models(self.hass, entry, provider)
+        except HomeAssistantError:
+            return self.async_abort(reason="cannot_connect")
+        if not self._models:
+            return self.async_abort(reason="no_image_models")
+        saved = entry.options.get(CONF_SAVED_MODELS, {})
+        current = (
+            active_model(entry)
+            if provider == active_provider(entry)
+            else saved.get(provider)
         )
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_MODEL,
-                    default=(user_input or {}).get(CONF_MODEL, current_model),
-                ): TextSelector(),
-            }
+        field = (
+            vol.Required(CONF_MODEL, default=current)
+            if current in self._models
+            else vol.Required(CONF_MODEL)
         )
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="model",
+            description_placeholders={
+                "provider": PROVIDER_LABELS[provider],
+                "count": str(len(self._models)),
+            },
+            data_schema=vol.Schema(
+                {field: SelectSelector(SelectSelectorConfig(options=self._models))}
+            ),
+        )
+
+    async def async_step_test_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        try:
+            models = await async_list_models(
+                self.hass, self.config_entry, active_provider(self.config_entry)
+            )
+        except HomeAssistantError:
+            return self.async_abort(reason="cannot_connect")
+        return self.async_abort(
+            reason="connection_test_complete",
+            description_placeholders={
+                "provider": PROVIDER_LABELS[active_provider(self.config_entry)],
+                "count": str(len(models)),
+                "selected": "Available"
+                if active_model(self.config_entry) in models
+                else "Not listed",
+            },
+        )
+
+    async def async_step_google_api(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        errors = {}
+        if user_input is not None:
+            key = user_input.get(
+                CONF_GOOGLE_API_KEY, ""
+            ).strip() or self.config_entry.options.get(CONF_GOOGLE_API_KEY)
+            if not key:
+                errors[CONF_GOOGLE_API_KEY] = "invalid_auth"
+            else:
+                try:
+                    await async_list_models(
+                        self.hass, self.config_entry, GOOGLE_API, google_key=key
+                    )
+                except HomeAssistantError:
+                    errors["base"] = "cannot_connect"
+                else:
+                    # Saving the key never activates the paid route.
+                    return self.async_create_entry(
+                        title="",
+                        data={**self.config_entry.options, CONF_GOOGLE_API_KEY: key},
+                    )
+        return self.async_show_form(
+            step_id="google_api",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_GOOGLE_API_KEY): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    )
+                }
+            ),
+            errors=errors,
+        )

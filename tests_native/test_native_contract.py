@@ -156,3 +156,67 @@ async def test_native_service(hass, enable_custom_integrations, tmp_path):
         path.read_bytes() == image.getvalue() for path in tmp_path.rglob("*.png")
     )
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_native_options_flow(hass, enable_custom_integrations, tmp_path):
+    """Refresh and select a provider in the real HA options flow."""
+    from homeassistant.setup import async_setup_component
+    from homeassistant.helpers import entity_registry as er
+    from custom_components.ai_task_cli_proxy import config_flow, providers
+
+    hass.config.media_dirs = {"local": str(tmp_path)}
+    assert await async_setup_component(hass, "homeassistant", {})
+    entry = MockConfigEntry(
+        domain="ai_task_cli_proxy",
+        title="CLIProxyAPI Images",
+        data={
+            "base_url": "http://unused.invalid",
+            "model": "gemini-3.1-flash-image",
+            "api_key": "fake",
+        },
+        options={"google_api_key": "fake-google"},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "ai_task", "ai_task_cli_proxy", entry.entry_id
+    )
+
+    async def catalog(_hass, _entry, provider, **kwargs):
+        return (
+            ["gpt-image-2"]
+            if provider == providers.PROXY_OPENAI
+            else ["gemini-3.1-flash-image"]
+        )
+
+    with patch.object(config_flow, "async_list_models", side_effect=catalog):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == "menu"
+        flow_id = result["flow_id"]
+        result = await hass.config_entries.options.async_configure(
+            flow_id, {"next_step_id": "select_provider"}
+        )
+        assert result["step_id"] == "select_provider"
+        result = await hass.config_entries.options.async_configure(
+            flow_id, {"provider": providers.PROXY_OPENAI}
+        )
+        assert result["step_id"] == "model"
+        result = await hass.config_entries.options.async_configure(
+            flow_id, {"model": "gpt-image-2"}
+        )
+        assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert entry.options["provider"] == providers.PROXY_OPENAI
+    assert entry.options["model"] == "gpt-image-2"
+    assert entry.options["google_api_key"] == "fake-google"
+    assert (
+        entry.options["saved_models"][providers.PROXY_GEMINI]
+        == "gemini-3.1-flash-image"
+    )
+    assert (
+        registry.async_get_entity_id("ai_task", "ai_task_cli_proxy", entry.entry_id)
+        == entity_id
+    )
+    assert await hass.config_entries.async_unload(entry.entry_id)

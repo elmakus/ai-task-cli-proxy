@@ -87,5 +87,101 @@
       "invalid_background": "Choose a supported background setting.",
       "invalid_auth": "Invalid proxy API key. Reauthentication is required."
     }
+  },
+  "exceptions": {
+    "mime_mismatch": {
+      "message": "CLIProxyAPI image MIME type does not match its format"
+    },
+    "pixel_limit": {
+      "message": "CLIProxyAPI generated image exceeds the pixel limit"
+    },
+    "animated_image": {
+      "message": "CLIProxyAPI returned an animated image"
+    },
+    "invalid_image": {
+      "message": "CLIProxyAPI returned invalid image data"
+    },
+    "image_size": {
+      "message": "CLIProxyAPI generated image exceeds the 25 MB size limit"
+    },
+    "invalid_json": {
+      "message": "CLIProxyAPI returned invalid JSON"
+    },
+    "invalid_response": {
+      "message": "CLIProxyAPI returned an invalid response"
+    },
+    "missing_image": {
+      "message": "CLIProxyAPI response did not include an image"
+    },
+    "missing_inline_image": {
+      "message": "CLIProxyAPI response did not include an inline image"
+    },
+    "unsupported_image_format": {
+      "message": "CLIProxyAPI returned an unsupported image format"
+    },
+    "unsupported_route": {
+      "message": "No verified image route for the selected provider and model"
+    },
+    "invalid_attachment_type": {
+      "message": "CLIProxyAPI image generation only supports image attachments"
+    },
+    "attachment_read": {
+      "message": "Could not read an image attachment"
+    },
+    "attachment_size": {
+      "message": "Image attachments exceed the 20 MB combined limit"
+    },
+    "response_size": {
+      "message": "CLIProxyAPI response exceeds the 40 MB size limit"
+    },
+    "generation_connection": {
+      "message": "Could not get an image response from CLIProxyAPI"
+    },
+    "unsupported_background": {
+      "message": "Unsupported background setting"
+    },
+    "unsupported_provider": {
+      "message": "Unsupported image provider"
+    },
+    "invalid_catalog_status": {
+      "message": "Invalid model catalog status"
+    },
+    "invalid_catalog": {
+      "message": "Invalid model catalog"
+    },
+    "invalid_auth": {
+      "message": "Invalid CLIProxyAPI key"
+    },
+    "catalog_connection": {
+      "message": "Could not retrieve model catalog"
+    },
+    "model_unavailable": {
+      "message": "The selected image model is not available"
+    },
+    "attachment_count": {
+      "message": "At most {limit} image attachments are supported"
+    },
+    "generation_http_status": {
+      "message": "CLIProxyAPI returned HTTP {status} while generating an image"
+    },
+    "catalog_http_status": {
+      "message": "Model catalog returned HTTP {status}"
+    },
+    "setup_connection": {
+      "message": "Could not connect to CLIProxyAPI during setup."
+    }
+  },
+  "entity": {
+    "ai_task": {
+      "image_generation": {
+        "name": "Image generation"
+      }
+    }
+  },
+  "issues": {
+    "missing_model": {
+      "title": "Selected CLIProxyAPI model is unavailable",
+      "description": "The proxy is reachable, but the selected image route is not advertised. Restore the route in CLIProxyAPI or select a verified model under Configure. No alternative provider is selected automatically."
+    }
   }
 }

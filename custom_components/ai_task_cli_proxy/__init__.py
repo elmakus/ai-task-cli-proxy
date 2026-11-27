@@ -1,33 +1,44 @@
 """CLIProxyAPI Image Generation integration."""
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import (
-    ConfigEntryAuthFailed,
-    ConfigEntryNotReady,
-    HomeAssistantError,
-)
+from homeassistant.helpers import issue_registry as ir
 
-from .providers import active_model, active_provider, async_list_models
+from .const import DOMAIN
+from .coordinator import CLIProxyAPIConfigEntry, CLIProxyAPICoordinator
 
 PLATFORMS = (Platform.AI_TASK,)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up CLIProxyAPI Image Generation from a config entry."""
-    try:
-        models = await async_list_models(hass, entry, active_provider(entry))
-    except ConfigEntryAuthFailed:
-        raise
-    except HomeAssistantError as err:
-        raise ConfigEntryNotReady(str(err)) from None
-    if active_model(entry) not in models:
-        raise ConfigEntryNotReady("The selected image model is not available")
+async def async_setup_entry(hass: HomeAssistant, entry: CLIProxyAPIConfigEntry) -> bool:
+    """Check the route before loading the AI Task entity."""
+    coordinator = CLIProxyAPICoordinator(hass, entry)
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a CLIProxyAPI Image Generation config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+async def _async_options_updated(
+    hass: HomeAssistant, entry: CLIProxyAPIConfigEntry
+) -> None:
+    """Refresh health when settings change, without retrying image generation."""
+    await entry.runtime_data.async_request_refresh()
+
+
+async def async_unload_entry(
+    hass: HomeAssistant, entry: CLIProxyAPIConfigEntry
+) -> bool:
+    """Unload the platform and remove the entry-owned repair."""
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    ir.async_delete_issue(hass, DOMAIN, f"missing_model_{entry.entry_id}")
+    return True
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, entry: CLIProxyAPIConfigEntry
+) -> None:
+    """Remove a repair even if setup did not complete."""
+    ir.async_delete_issue(hass, DOMAIN, f"missing_model_{entry.entry_id}")

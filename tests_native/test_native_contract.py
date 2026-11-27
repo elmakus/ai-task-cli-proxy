@@ -93,6 +93,7 @@ async def test_actual_ha_result(hass, split):
             "model": "antigravity/gemini-3.1-flash-image",
         },
     )
+    entry.runtime_data = adapter.CLIProxyAPICoordinator(hass, entry)
     entity = adapter.CLIProxyAPIImageTaskEntity(entry)
     entity.hass = hass
     entity.entity_id = "ai_task.audit_fixture"
@@ -312,4 +313,59 @@ async def test_native_default_transparent_png(
     assert any(
         path.read_bytes() == image.getvalue() for path in tmp_path.rglob("*.png")
     )
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_service_device_diagnostics_and_translations(hass, enable_custom_integrations):
+    """Preserve the existing registry identity and expose only safe diagnostics."""
+    from homeassistant.config_entries import ConfigEntryState
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.helpers import device_registry as dr, entity_registry as er
+    from homeassistant.helpers import translation
+    from homeassistant.setup import async_setup_component
+    from custom_components.ai_task_cli_proxy.diagnostics import async_get_config_entry_diagnostics
+
+    assert await async_setup_component(hass, "homeassistant", {})
+    entry = MockConfigEntry(
+        domain="ai_task_cli_proxy",
+        title="CLIProxyAPI Images",
+        data={"base_url": "http://private-host.invalid", "api_key": "synthetic-secret"},
+        options={"google_api_key": "legacy-secret"},
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    original = registry.async_get_or_create(
+        "ai_task", "ai_task_cli_proxy", entry.entry_id,
+        suggested_object_id="image_generation", config_entry=entry,
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+    current = registry.async_get(original.entity_id)
+    assert current is not None
+    assert current.unique_id == entry.entry_id
+    assert current.device_id is not None
+    device = dr.async_get(hass).async_get(current.device_id)
+    assert device is not None
+    assert device.entry_type is dr.DeviceEntryType.SERVICE
+    assert device.identifiers == {("ai_task_cli_proxy", entry.entry_id)}
+    assert current.translation_key == "image_generation"
+    result = await async_get_config_entry_diagnostics(hass, entry)
+    assert result == {
+        "entry_state": "loaded", "catalog_available": True, "provider": "chatgpt",
+        "model": "gpt-image-2.6-flare", "protocol": "openai",
+        "background": "transparent",
+    }
+    assert "secret" not in json.dumps(result)
+    assert "private-host" not in json.dumps(result)
+    hass.config_entries.async_update_entry(entry, options={"provider": "unknown-secret", "model": "secret", "background": "secret"})
+    result = await async_get_config_entry_diagnostics(hass, entry)
+    assert result["provider"] == result["model"] == "unverified"
+    assert result["background"] == "invalid"
+    assert "secret" not in json.dumps(result)
+    with pytest.raises(HomeAssistantError) as caught:
+        adapter._decode_image("!")
+    assert caught.value.translation_key == "invalid_image"
+    messages = await translation.async_get_translations(hass, "en", "exceptions", integrations={"ai_task_cli_proxy"})
+    assert messages["component.ai_task_cli_proxy.exceptions.invalid_image.message"] == str(caught.value)
     assert await hass.config_entries.async_unload(entry.entry_id)

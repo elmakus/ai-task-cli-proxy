@@ -1,0 +1,83 @@
+rules:
+  # Bronze
+  action-setup:
+    status: exempt
+    comment: The native AI Task integration registers the action.
+  appropriate-polling: done
+  brands:
+    status: done
+    comment: Local brand assets are included.
+  common-modules: done
+  config-flow-test-coverage: done
+  config-flow: done
+  dependency-transparency: done
+  docs-actions: done
+  docs-conditions:
+    status: exempt
+    comment: No custom conditions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
+  docs-triggers:
+    status: exempt
+    comment: No custom triggers.
+  entity-event-setup: done
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure: done
+  test-before-setup: done
+  unique-config-entry: done
+  # Silver
+  action-exceptions: done
+  config-entry-unloading: done
+  docs-configuration-parameters: done
+  docs-installation-parameters: done
+  entity-unavailable: done
+  integration-owner: done
+  log-when-unavailable: done
+  parallel-updates: done
+  reauthentication-flow: done
+  test-coverage: done
+  # Gold
+  devices: done
+  diagnostics: done
+  discovery-update-info:
+    status: exempt
+    comment: Manually configured proxy URL; no discovery protocol.
+  discovery:
+    status: exempt
+    comment: Arbitrary manually configured software service.
+  docs-data-update: done
+  docs-examples: done
+  docs-known-limitations: done
+  docs-supported-devices: done
+  docs-supported-functions: done
+  docs-troubleshooting: done
+  docs-use-cases: done
+  dynamic-devices:
+    status: exempt
+    comment: One service device per config entry; no remote device inventory.
+  entity-category:
+    status: exempt
+    comment: The only entity is the primary AI Task functionality.
+  entity-device-class:
+    status: exempt
+    comment: AI Task does not define device classes.
+  entity-disabled-by-default:
+    status: exempt
+    comment: No secondary entities.
+  entity-translations: done
+  exception-translations: done
+  icon-translations: done
+  reconfiguration-flow: done
+  repair-issues: done
+  stale-devices:
+    status: exempt
+    comment: One service device tied to its config entry, no remote inventory.
+  # Platinum
+  async-dependency: done
+  inject-websession:
+    status: done
+    comment: Uses Home Assistant's shared aiohttp client session directly.
+  strict-typing: done

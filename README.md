@@ -92,12 +92,52 @@ Generated images are limited to 25 MiB and 25 million pixels, responses to
 40 MiB, and the total reference attachments to 20 MiB. Generated images must
 be decodable, non-animated PNG, JPEG or WebP matching the reported MIME type.
 Oversized or malformed responses result in a Home Assistant error instead of an
-unbounded read. Requests are never automatically retried by this adapter; after
+unbounded read. Image-generation requests are never automatically retried by this adapter; after
 a timeout or malformed provider response, the outcome may be unknown.
+
+## Availability, diagnostics and troubleshooting
+
+The adapter represents one configured CLIProxyAPI server as a service device
+with one AI Task entity. It does not manage physical devices or discover servers
+on the network. The model catalog is checked at setup, after configuration
+changes and every five minutes with a 20-second timeout. These read-only checks
+do not generate images or select another provider. If the proxy is unreachable
+or the selected model is absent, the entity becomes unavailable and recovers
+after a successful check. Home Assistant logs availability transitions.
+
+- If authentication fails, follow the Home Assistant reauthentication flow.
+- If a selected model disappears, follow the repair notification: restore its
+  route at the proxy or choose an available model in **Configure**.
+- If the server cannot be reached, verify its URL, network access and TLS.
+- If generation fails despite a healthy catalog, check upstream credentials,
+  quota, account routing and the selected model at the proxy. A successful
+  catalog check does not prove successful image generation.
+- After a generation timeout, inspect the proxy before manually retrying;
+  the initial request may already have been processed.
+
+Download diagnostics from the integration menu. Diagnostics report only
+recognized provider/model information, protocol, background, config-entry
+state and catalog availability. They omit credentials, server URLs, prompts
+and image data and do not make a network request.
 
 ## Usage and removal
 
 Use the native [AI Task](https://www.home-assistant.io/integrations/ai_task/) action `ai_task.generate_image` with the configured entity, or select it in Activity Images.
+
+For example, generate an image for a dashboard or an activity illustration
+using the native action (replace the entity ID if yours differs):
+
+```yaml
+action: ai_task.generate_image
+data:
+  entity_id: ai_task.image_generation
+  task_name: Activity illustration
+  instructions: A simple illustration of a bicycle on a transparent background
+response_variable: generated_image
+```
+
+This explicitly requests an image and may consume upstream quota. The native
+AI Task service returns the generated image reference and metadata.
 
 To remove the adapter, first check automations and integrations referencing its AI Task entity. Go to **Settings → Devices & services**, open CLIProxyAPI Image Generation, and select **Delete** from the integration menu. To uninstall the code, remove the repository from Marketplace or HACS and restart Home Assistant when prompted. This does not remove the CLIProxyAPI server or its upstream accounts.
 
@@ -111,7 +151,7 @@ pull requests.
 Run them locally with:
 
 ```sh
-python -m pip install pytest aiohttp voluptuous pillow
+python -m pip install pytest aiohttp probatio voluptuous pillow
 python -m pytest -q tests/
 ```
 
@@ -126,6 +166,12 @@ python -m pytest -p no:respx --asyncio-mode=auto -o asyncio_default_fixture_loop
 ```
 
 No test requires a real CLIProxyAPI server, API credentials or paid generation.
+CI also runs strict mypy and enforces 100% statement coverage of the config flow
+and greater than 95% statement coverage of every other integration module.
+HACS and hassfest validation run separately. See
+[quality_scale.yaml](custom_components/ai_task_cli_proxy/quality_scale.yaml)
+for the local cumulative Home Assistant quality assessment; it is not an
+official Home Assistant Core certification.
 
 ## Branding
 

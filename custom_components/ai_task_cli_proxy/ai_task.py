@@ -14,13 +14,15 @@ from aiohttp import ClientError, ClientResponseError, ClientTimeout
 from PIL import Image
 
 from homeassistant.components import ai_task, conversation
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import REQUEST_TIMEOUT_SECONDS
+from .const import DOMAIN, REQUEST_TIMEOUT_SECONDS
+from .coordinator import CLIProxyAPIConfigEntry, CLIProxyAPICoordinator
 
 from .http import ResponseTooLarge, async_read_bounded
 from .providers import (
@@ -31,6 +33,8 @@ from .providers import (
     model_protocol,
     provider_connection,
 )
+
+PARALLEL_UPDATES = 0
 
 MAX_ATTACHMENT_COUNT = 10
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -62,20 +66,32 @@ def _validate_image(data: bytes, mime_type: str) -> tuple[int, int]:
         with Image.open(BytesIO(data), formats=list(IMAGE_FORMATS)) as image:
             if IMAGE_FORMATS.get(image.format or "") != mime_type:
                 raise HomeAssistantError(
-                    "CLIProxyAPI image MIME type does not match its format"
+                    "CLIProxyAPI image MIME type does not match its format",
+                    translation_domain=DOMAIN,
+                    translation_key="mime_mismatch",
                 )
             width, height = image.size
             if width * height > MAX_IMAGE_PIXELS:
                 raise HomeAssistantError(
-                    "CLIProxyAPI generated image exceeds the pixel limit"
+                    "CLIProxyAPI generated image exceeds the pixel limit",
+                    translation_domain=DOMAIN,
+                    translation_key="pixel_limit",
                 )
             if getattr(image, "is_animated", False):
-                raise HomeAssistantError("CLIProxyAPI returned an animated image")
+                raise HomeAssistantError(
+                    "CLIProxyAPI returned an animated image",
+                    translation_domain=DOMAIN,
+                    translation_key="animated_image",
+                )
             image.verify()
         with Image.open(BytesIO(data), formats=list(IMAGE_FORMATS)) as image:
             image.load()
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as err:
-        raise HomeAssistantError("CLIProxyAPI returned invalid image data") from err
+        raise HomeAssistantError(
+            "CLIProxyAPI returned invalid image data",
+            translation_domain=DOMAIN,
+            translation_key="invalid_image",
+        ) from err
     return width, height
 
 
@@ -83,15 +99,23 @@ def _decode_image(encoded: str) -> bytes:
     """Decode a bounded inline image without accepting remote image URLs."""
     if len(encoded) > ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 4:
         raise HomeAssistantError(
-            "CLIProxyAPI generated image exceeds the 25 MB size limit"
+            "CLIProxyAPI generated image exceeds the 25 MB size limit",
+            translation_domain=DOMAIN,
+            translation_key="image_size",
         )
     try:
         decoded = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as err:
-        raise HomeAssistantError("CLIProxyAPI returned invalid image data") from err
+        raise HomeAssistantError(
+            "CLIProxyAPI returned invalid image data",
+            translation_domain=DOMAIN,
+            translation_key="invalid_image",
+        ) from err
     if len(decoded) > MAX_IMAGE_BYTES:
         raise HomeAssistantError(
-            "CLIProxyAPI generated image exceeds the 25 MB size limit"
+            "CLIProxyAPI generated image exceeds the 25 MB size limit",
+            translation_domain=DOMAIN,
+            translation_key="image_size",
         )
     return decoded
 
@@ -128,9 +152,17 @@ def _parse_response(
     try:
         result: Any = json.loads(raw_response)
     except (ValueError, UnicodeDecodeError, RecursionError) as err:
-        raise HomeAssistantError("CLIProxyAPI returned invalid JSON") from err
+        raise HomeAssistantError(
+            "CLIProxyAPI returned invalid JSON",
+            translation_domain=DOMAIN,
+            translation_key="invalid_json",
+        ) from err
     if not isinstance(result, dict):
-        raise HomeAssistantError("CLIProxyAPI returned an invalid response")
+        raise HomeAssistantError(
+            "CLIProxyAPI returned an invalid response",
+            translation_domain=DOMAIN,
+            translation_key="invalid_response",
+        )
 
     if openai:
         images = result.get("data")
@@ -139,11 +171,17 @@ def _parse_response(
             or not images
             or not isinstance(images[0], dict)
         ):
-            raise HomeAssistantError("CLIProxyAPI response did not include an image")
+            raise HomeAssistantError(
+                "CLIProxyAPI response did not include an image",
+                translation_domain=DOMAIN,
+                translation_key="missing_image",
+            )
         encoded = images[0].get("b64_json")
         if not isinstance(encoded, str):
             raise HomeAssistantError(
-                "CLIProxyAPI response did not include an inline image"
+                "CLIProxyAPI response did not include an inline image",
+                translation_domain=DOMAIN,
+                translation_key="missing_inline_image",
             )
         data = _decode_image(encoded)
         format_name = result.get("output_format") or "png"
@@ -155,7 +193,11 @@ def _parse_response(
             else None
         )
         if mime is None:
-            raise HomeAssistantError("CLIProxyAPI returned an unsupported image format")
+            raise HomeAssistantError(
+                "CLIProxyAPI returned an unsupported image format",
+                translation_domain=DOMAIN,
+                translation_key="unsupported_image_format",
+            )
         width, height = _validate_image(data, mime)
         revised = images[0].get("revised_prompt")
         return data, mime, revised if isinstance(revised, str) else "", width, height
@@ -196,34 +238,46 @@ def _parse_response(
                 response_text.append(part["text"])
 
     if image_bytes is None or mime_type is None:
-        raise HomeAssistantError("CLIProxyAPI response did not include an image")
+        raise HomeAssistantError(
+            "CLIProxyAPI response did not include an image",
+            translation_domain=DOMAIN,
+            translation_key="missing_image",
+        )
     width, height = _validate_image(image_bytes, mime_type)
     return image_bytes, mime_type, "".join(response_text), width, height
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: CLIProxyAPIConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the CLIProxyAPI AI Task entity."""
     async_add_entities([CLIProxyAPIImageTaskEntity(entry)])
 
 
-class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
+class CLIProxyAPIImageTaskEntity(
+    CoordinatorEntity[CLIProxyAPICoordinator], ai_task.AITaskEntity
+):
     """Generate images through a local CLIProxyAPI endpoint."""
 
     _attr_has_entity_name = True
-    _attr_name = "Image generation"
+    _attr_translation_key = "image_generation"
     _attr_supported_features = (
         ai_task.AITaskEntityFeature.GENERATE_IMAGE
         | ai_task.AITaskEntityFeature.SUPPORT_ATTACHMENTS
     )
 
-    def __init__(self, entry: ConfigEntry) -> None:
+    def __init__(self, entry: CLIProxyAPIConfigEntry) -> None:
         """Initialize the entity."""
+        super().__init__(entry.runtime_data)
         self._entry = entry
         self._attr_unique_id = entry.entry_id
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="CLIProxyAPI",
+            entry_type=DeviceEntryType.SERVICE,
+        )
 
     @override
     async def _async_generate_image(
@@ -238,7 +292,9 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
         protocol = model_protocol(provider, model)
         if protocol is None:
             raise HomeAssistantError(
-                "No verified image route for the selected provider and model"
+                "No verified image route for the selected provider and model",
+                translation_domain=DOMAIN,
+                translation_key="unsupported_route",
             )
         openai = protocol == "openai"
         background = active_background(self._entry)
@@ -253,14 +309,19 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
         if task.attachments:
             if len(task.attachments) > MAX_ATTACHMENT_COUNT:
                 raise HomeAssistantError(
-                    f"At most {MAX_ATTACHMENT_COUNT} image attachments are supported"
+                    f"At most {MAX_ATTACHMENT_COUNT} image attachments are supported",
+                    translation_domain=DOMAIN,
+                    translation_key="attachment_count",
+                    translation_placeholders={"limit": str(MAX_ATTACHMENT_COUNT)},
                 )
 
             total_attachment_bytes = 0
             for attachment in task.attachments:
                 if not attachment.mime_type.startswith("image/"):
                     raise HomeAssistantError(
-                        "CLIProxyAPI image generation only supports image attachments"
+                        "CLIProxyAPI image generation only supports image attachments",
+                        translation_domain=DOMAIN,
+                        translation_key="invalid_attachment_type",
                     )
                 try:
                     attachment_data = await self.hass.async_add_executor_job(
@@ -270,13 +331,17 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
                     )
                 except OSError as err:
                     raise HomeAssistantError(
-                        "Could not read an image attachment"
+                        "Could not read an image attachment",
+                        translation_domain=DOMAIN,
+                        translation_key="attachment_read",
                     ) from err
 
                 total_attachment_bytes += len(attachment_data)
                 if total_attachment_bytes > MAX_ATTACHMENT_BYTES:
                     raise HomeAssistantError(
-                        "Image attachments exceed the 20 MB combined limit"
+                        "Image attachments exceed the 20 MB combined limit",
+                        translation_domain=DOMAIN,
+                        translation_key="attachment_size",
                     )
                 parts.append(
                     {
@@ -317,7 +382,10 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
                 response.raise_for_status()
                 if not 200 <= response.status < 300:
                     raise HomeAssistantError(
-                        f"CLIProxyAPI returned HTTP {response.status} while generating an image"
+                        f"CLIProxyAPI returned HTTP {response.status} while generating an image",
+                        translation_domain=DOMAIN,
+                        translation_key="generation_http_status",
+                        translation_placeholders={"status": str(response.status)},
                     )
                 try:
                     raw_response = await async_read_bounded(
@@ -325,7 +393,9 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
                     )
                 except ResponseTooLarge as err:
                     raise HomeAssistantError(
-                        "CLIProxyAPI response exceeds the 40 MB size limit"
+                        "CLIProxyAPI response exceeds the 40 MB size limit",
+                        translation_domain=DOMAIN,
+                        translation_key="response_size",
                     ) from err
         except ClientResponseError as err:
             # A generation error can be upstream auth/quota, not the proxy key.
@@ -338,12 +408,17 @@ class CLIProxyAPIImageTaskEntity(ai_task.AITaskEntity):
                 except HomeAssistantError:
                     pass
             raise HomeAssistantError(
-                f"CLIProxyAPI returned HTTP {err.status} while generating an image"
-            ) from err
-        except (ClientError, TimeoutError, ValueError) as err:
+                f"CLIProxyAPI returned HTTP {err.status} while generating an image",
+                translation_domain=DOMAIN,
+                translation_key="generation_http_status",
+                translation_placeholders={"status": str(err.status)},
+            ) from None
+        except (ClientError, TimeoutError, ValueError):
             raise HomeAssistantError(
-                "Could not get an image response from CLIProxyAPI"
-            ) from err
+                "Could not get an image response from CLIProxyAPI",
+                translation_domain=DOMAIN,
+                translation_key="generation_connection",
+            ) from None
 
         (
             image_bytes,

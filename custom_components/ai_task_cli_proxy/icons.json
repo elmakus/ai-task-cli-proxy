@@ -1,0 +1,9 @@
+{
+  "entity": {
+    "ai_task": {
+      "image_generation": {
+        "default": "mdi:image-auto-adjust"
+      }
+    }
+  }
+}

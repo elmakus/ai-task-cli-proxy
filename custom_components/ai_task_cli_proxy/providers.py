@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from aiohttp import ClientError, ClientResponseError, ClientTimeout
 
@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_BASE_URL, CONF_MODEL, DEFAULT_MODEL
+from .const import CONF_BASE_URL, CONF_MODEL, DEFAULT_MODEL, DOMAIN
 from .http import async_read_bounded
 
 CHATGPT = "chatgpt"
@@ -63,20 +63,24 @@ OPENAI_IMAGE_MODELS = {
 
 def active_provider(entry: ConfigEntry) -> str:
     """Legacy entries without an explicit provider use the new default."""
-    return entry.options.get(CONF_PROVIDER, CHATGPT)
+    return cast(str, entry.options.get(CONF_PROVIDER, CHATGPT))
 
 
 def active_model(entry: ConfigEntry) -> str:
     if CONF_PROVIDER not in entry.options:
         return DEFAULT_MODEL
-    return entry.options.get(CONF_MODEL, DEFAULT_MODEL)
+    return cast(str, entry.options.get(CONF_MODEL, DEFAULT_MODEL))
 
 
 def active_background(entry: ConfigEntry) -> str:
     value = entry.options.get(CONF_BACKGROUND, DEFAULT_BACKGROUND)
     if value not in BACKGROUND_CHOICES:
-        raise HomeAssistantError("Unsupported background setting")
-    return value
+        raise HomeAssistantError(
+            "Unsupported background setting",
+            translation_domain=DOMAIN,
+            translation_key="unsupported_background",
+        )
+    return cast(str, value)
 
 
 def provider_connection(
@@ -84,7 +88,11 @@ def provider_connection(
 ) -> tuple[str, dict[str, str]]:
     """All profiles use the same CLIProxyAPI server and credential."""
     if provider not in PROVIDER_LABELS:
-        raise HomeAssistantError("Unsupported image provider")
+        raise HomeAssistantError(
+            "Unsupported image provider",
+            translation_domain=DOMAIN,
+            translation_key="unsupported_provider",
+        )
     return entry.data[CONF_BASE_URL].rstrip("/"), {
         "Authorization": f"Bearer {entry.data[CONF_API_KEY]}"
     }
@@ -143,12 +151,20 @@ async def async_fetch_catalog(
         ) as response:
             response.raise_for_status()
             if not 200 <= response.status < 300:
-                raise HomeAssistantError("Invalid model catalog status")
+                raise HomeAssistantError(
+                    "Invalid model catalog status",
+                    translation_domain=DOMAIN,
+                    translation_key="invalid_catalog_status",
+                )
             payload = json.loads(
                 await async_read_bounded(response.content, MAX_MODELS_RESPONSE_BYTES)
             )
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            raise HomeAssistantError("Invalid model catalog")
+            raise HomeAssistantError(
+                "Invalid model catalog",
+                translation_domain=DOMAIN,
+                translation_key="invalid_catalog",
+            )
         rows = payload["data"]
         if not all(
             isinstance(row, dict)
@@ -156,14 +172,31 @@ async def async_fetch_catalog(
             and row["id"].strip()
             for row in rows
         ):
-            raise HomeAssistantError("Invalid model catalog")
-        return rows
+            raise HomeAssistantError(
+                "Invalid model catalog",
+                translation_domain=DOMAIN,
+                translation_key="invalid_catalog",
+            )
+        return cast(list[dict[str, Any]], rows)
     except ClientResponseError as err:
         if err.status in (401, 403):
-            raise ConfigEntryAuthFailed("Invalid CLIProxyAPI key") from None
-        raise HomeAssistantError(f"Model catalog returned HTTP {err.status}") from None
+            raise ConfigEntryAuthFailed(
+                "Invalid CLIProxyAPI key",
+                translation_domain=DOMAIN,
+                translation_key="invalid_auth",
+            ) from None
+        raise HomeAssistantError(
+            f"Model catalog returned HTTP {err.status}",
+            translation_domain=DOMAIN,
+            translation_key="catalog_http_status",
+            translation_placeholders={"status": str(err.status)},
+        ) from None
     except (ClientError, TimeoutError, ValueError, OSError, RecursionError):
-        raise HomeAssistantError("Could not retrieve model catalog") from None
+        raise HomeAssistantError(
+            "Could not retrieve model catalog",
+            translation_domain=DOMAIN,
+            translation_key="catalog_connection",
+        ) from None
 
 
 async def async_list_models(

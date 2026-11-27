@@ -6,15 +6,15 @@ from typing import Any
 from urllib.parse import urlsplit
 from yarl import URL
 
-import voluptuous as vol
+import probatio as vol
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
-from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.selector import (
+    SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     TextSelector,
@@ -98,7 +98,7 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Configure a new provider."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -140,7 +140,7 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Change the server URL or key without creating a second entry."""
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
@@ -195,13 +195,13 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reconfigure", data_schema=schema, errors=errors
         )
 
-    async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Start the native reauthentication flow."""
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Replace only the proxy API key."""
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
@@ -238,9 +238,12 @@ class CLIProxyAPIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
     """Select and remember image routes without reloading the AI Task entity."""
 
+    _provider: str
+    _models: list[str]
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
             menu_options=[
@@ -253,7 +256,7 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_select_provider(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         if user_input is not None:
             self._provider = user_input[CONF_PROVIDER]
             return await self.async_step_model()
@@ -266,7 +269,7 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
                     ): SelectSelector(
                         SelectSelectorConfig(
                             options=[
-                                {"value": key, "label": label}
+                                SelectOptionDict(value=key, label=label)
                                 for key, label in PROVIDER_LABELS.items()
                             ]
                         )
@@ -277,13 +280,13 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_refresh_models(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         self._provider = active_provider(self.config_entry)
         return await self.async_step_model()
 
     async def async_step_model(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         provider = self._provider
         entry = self.config_entry
         if user_input is not None:
@@ -333,7 +336,7 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_test_connection(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         try:
             models = await async_list_models(
                 self.hass, self.config_entry, active_provider(self.config_entry)
@@ -356,7 +359,7 @@ class CLIProxyAPIOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_background(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         if user_input is not None:
             value = user_input[CONF_BACKGROUND]
             if value not in BACKGROUND_CHOICES:

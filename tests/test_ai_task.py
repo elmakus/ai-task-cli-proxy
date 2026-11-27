@@ -22,6 +22,23 @@ class _Feature(IntFlag):
     SUPPORT_ATTACHMENTS = 2
 
 
+class _HAError(RuntimeError):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args)
+        self.translation_key = kwargs.get("translation_key")
+
+
+class _Coordinator:
+    @classmethod
+    def __class_getitem__(cls, _item):
+        return cls
+
+
+class _CoordinatorEntity(_Coordinator):
+    def __init__(self, coordinator):
+        self.coordinator = coordinator
+
+
 class _AITaskEntity:
     hass = None
 
@@ -110,6 +127,9 @@ def _install_home_assistant_stubs() -> None:
         "homeassistant.helpers.aiohttp_client": ModuleType(
             "homeassistant.helpers.aiohttp_client"
         ),
+        "homeassistant.helpers.issue_registry": ModuleType("homeassistant.helpers.issue_registry"),
+        "homeassistant.helpers.update_coordinator": ModuleType("homeassistant.helpers.update_coordinator"),
+        "homeassistant.helpers.device_registry": ModuleType("homeassistant.helpers.device_registry"),
         "homeassistant.helpers.entity_platform": ModuleType(
             "homeassistant.helpers.entity_platform"
         ),
@@ -128,12 +148,14 @@ def _install_home_assistant_stubs() -> None:
     ].AssistantContent = _AssistantContent
     modules["homeassistant.components.conversation"].ChatLog = object
     modules["homeassistant.config_entries"].ConfigEntry = object
+    modules["homeassistant.config_entries"].ConfigFlowResult = dict
     modules["homeassistant.config_entries"].ConfigFlow = _ConfigFlow
     modules["homeassistant.config_entries"].OptionsFlow = _OptionsFlow
     modules["homeassistant.data_entry_flow"].FlowResult = dict
     modules["homeassistant.core"].callback = lambda fn: fn
 
     selectors = modules["homeassistant.helpers.selector"]
+    selectors.SelectOptionDict = dict
     selectors.SelectSelector = lambda _config=None: str
     selectors.SelectSelectorConfig = lambda **kwargs: SimpleNamespace(**kwargs)
     selectors.TextSelector = lambda _config=None: str
@@ -142,15 +164,20 @@ def _install_home_assistant_stubs() -> None:
     modules["homeassistant.const"].CONF_API_KEY = "api_key"
     modules["homeassistant.const"].Platform = SimpleNamespace(AI_TASK="ai_task")
     modules["homeassistant.core"].HomeAssistant = object
-    modules["homeassistant.exceptions"].HomeAssistantError = RuntimeError
-    modules["homeassistant.exceptions"].ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (RuntimeError,), {})
-    modules["homeassistant.exceptions"].ConfigEntryNotReady = type("ConfigEntryNotReady", (RuntimeError,), {})
+    modules["homeassistant.exceptions"].HomeAssistantError = _HAError
+    modules["homeassistant.exceptions"].ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (_HAError,), {})
+    modules["homeassistant.exceptions"].ConfigEntryNotReady = type("ConfigEntryNotReady", (_HAError,), {})
     modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession = (
         lambda _hass: None
     )
     modules[
         "homeassistant.helpers.entity_platform"
     ].AddConfigEntryEntitiesCallback = object
+    modules["homeassistant.helpers.device_registry"].DeviceInfo = dict
+    modules["homeassistant.helpers.device_registry"].DeviceEntryType = SimpleNamespace(SERVICE="service")
+    modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = _Coordinator
+    modules["homeassistant.helpers.update_coordinator"].CoordinatorEntity = _CoordinatorEntity
+    modules["homeassistant.helpers.update_coordinator"].UpdateFailed = _HAError
     sys.modules.update(modules)
 
 
@@ -258,6 +285,7 @@ def test_image_attachment_is_sent_as_gemini_inline_data(
             "api_key": "not-a-real-key",
         },
     )
+    entry.runtime_data = None
     entity = integration.CLIProxyAPIImageTaskEntity(entry)
     entity.hass = _FakeHass()
     entity.entity_id = "ai_task.cli_proxy"
@@ -328,6 +356,7 @@ def _entity_for_test():
             "api_key": "not-a-real-key",
         },
     )
+    entry.runtime_data = None
     entity = integration.CLIProxyAPIImageTaskEntity(entry)
     entity.hass = _FakeHass()
     entity.entity_id = "ai_task.image_generation"
@@ -1143,13 +1172,13 @@ def test_invalid_url(url):
 @pytest.mark.parametrize("auth_failure", [True, False])
 def test_options_catalog_failure(monkeypatch, step, auth_failure):
     from unittest.mock import AsyncMock, Mock
-    from homeassistant.exceptions import ConfigEntryAuthFailed
+    from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
     from custom_components.ai_task_cli_proxy import config_flow
     flow = config_flow.CLIProxyAPIOptionsFlow()
     entry = _entity_for_test()._entry
     entry.async_start_reauth = Mock()
     flow.config_entry = entry
-    error = ConfigEntryAuthFailed("synthetic") if auth_failure else RuntimeError("synthetic")
+    error = ConfigEntryAuthFailed("synthetic") if auth_failure else HomeAssistantError("synthetic")
     monkeypatch.setattr(config_flow, "async_list_models", AsyncMock(side_effect=error))
     result = asyncio.run(getattr(flow, "async_step_"+step)())
     assert result["reason"] == ("invalid_auth" if auth_failure else "cannot_connect")
@@ -1177,12 +1206,12 @@ def test_catalog_http_status(monkeypatch, status):
 def test_generation_auth_failure_rechecks_proxy_without_retry(monkeypatch, probe_failure):
     from unittest.mock import AsyncMock, Mock
     from aiohttp import ClientResponseError
-    from homeassistant.exceptions import ConfigEntryAuthFailed
+    from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
     entity = _entity_for_test()
     entity._entry.async_start_reauth = Mock()
     post = Mock(return_value=_ControlledResponse(error=ClientResponseError(None, (), status=401)))
     monkeypatch.setattr(integration, "async_get_clientsession", lambda _: SimpleNamespace(post=post))
-    failure = {"auth": ConfigEntryAuthFailed("synthetic"), "connect": RuntimeError("synthetic"), "none": None}[probe_failure]
+    failure = {"auth": ConfigEntryAuthFailed("synthetic"), "connect": HomeAssistantError("synthetic"), "none": None}[probe_failure]
     probe = AsyncMock(side_effect=failure, return_value=[])
     monkeypatch.setattr(integration, "async_list_models", probe)
     with pytest.raises(RuntimeError, match="HTTP 401"):

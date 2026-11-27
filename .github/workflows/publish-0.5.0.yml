@@ -1,0 +1,17 @@
+name: Publish approved v0.5.0
+on:
+  push:
+    branches: [release/v0.5.0]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish exact tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create v0.5.0 --target f2475d3c1c53e84d39dda4b1ae21fdfcfd1fab31 --title "CLIProxyAPI Image Generation 0.5.0" --notes "Cumulative Home Assistant Platinum quality self-assessment: native coordinator and availability recovery, reauthentication and repairs, redacted diagnostics, stable service device identity, translated errors, strict typing, and expanded tests. MIT license. Existing configuration and entity identity preserved. No automatic paid fallback."
